@@ -27,6 +27,7 @@
       <button id="tabLearn" role="tab">学习</button>
       <button id="tabGames" role="tab">棋谱</button>
       <button id="tabPractice" role="tab">练习</button>
+      <button id="tabGrowth" role="tab">成长</button>
     </div>
     <button id="btnTheme" class="small" title="白天 / 夜晚" aria-label="切换白天 / 夜晚"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 5a7 7 0 0 0 0 14z" fill="currentColor" stroke="none"/><path d="M12 5a7 7 0 0 1 0 14a5 5 0 0 0 0-14z" fill="currentColor" stroke="none" opacity=".35"/><circle cx="12" cy="12" r="7"/><path d="M12 1.5v1.5M12 21v1.5M4.6 4.6l1 1M18.4 18.4l1 1M1.5 12H3M21 12h1.5M4.6 19.4l1-1M18.4 5.6l1-1"/></svg></button>
     <button id="btnHelp" class="small">说明</button>
@@ -104,6 +105,8 @@
     </label>
     <label class="row">我执 <select name="side"></select></label>
     <label class="row">AI 难度 <select name="level"></select></label>
+    <p class="note" id="levelRec"></p>
+    <label class="chip"><input type="checkbox" name="rated">计分对局（赢了加分、输了扣分；悔棋、提示会改为不计分）</label>
     <p class="note" id="levelNote"></p>
     <menu>
       <button value="cancel">取消</button>
@@ -142,6 +145,7 @@
 </dialog>
 
 <script src="menu.js"></script>
+<script src="growth.js"></script>
 <script src="cc/chess.js"></script>
 <script src="cc/xiangqi.js"></script>
 <script src="cc/data-chess.js"></script>

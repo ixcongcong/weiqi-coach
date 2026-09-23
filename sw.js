@@ -2,12 +2,12 @@
  * 发布新版本时修改 VERSION：浏览器发现 sw.js 变了，就会在后台下载新文件，
  * 页面收到 controllerchange 后提示“新版本已下载好”。
  * 神经网络和 onnxruntime 很大（约 30 MB），放在单独的 ASSETS 缓存里，文件名不变就不重新下载。 */
-const VERSION = 'weiqi-coach-3.5';
+const VERSION = 'weiqi-coach-3.6';
 const ASSETS = 'weiqi-assets-1';
 const FILES = [
   './', 'index.html', 'app.css', 'app.js', 'engine.js', 'nn.js', 'nnworker.js', 'games.js', 'problems.js', 'faq.js', 'assistant.js', 'manifest.webmanifest',
   'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png',
-  'menu.js', 'cc.html', 'cc/cc.css', 'cc/app.js', 'cc/chess.js', 'cc/xiangqi.js', 'cc/search.js', 'cc/worker.js', 'cc/data-chess.js', 'cc/data-xiangqi.js',
+  'menu.js', 'growth.js', 'cc.html', 'cc/cc.css', 'cc/app.js', 'cc/chess.js', 'cc/xiangqi.js', 'cc/search.js', 'cc/worker.js', 'cc/data-chess.js', 'cc/data-xiangqi.js',
 ];
 const BIG = ['ort/ort.wasm.min.js', 'ort/ort-wasm-simd-threaded.mjs', 'ort/ort-wasm-simd-threaded.wasm', 'models/b10.onnx', 'models/b6.onnx'];
 const isBig = url => /\/(ort|models)\//.test(new URL(url).pathname);

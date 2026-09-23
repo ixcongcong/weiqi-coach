@@ -359,3 +359,22 @@ dialog menu { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8p
 .menu-item span { font-size: 12.5px; color: var(--muted); }
 .menu-item.on { border-color: var(--accent); background: var(--on); }
 .menu-item.on b { color: var(--accent); }
+
+/* v3.6 成长 */
+.growth .g-rank { display: flex; gap: 14px; align-items: center; }
+.g-big { font-size: 30px; font-weight: 800; color: var(--accent); white-space: nowrap; }
+.g-bar { height: 7px; border-radius: 4px; background: var(--track); overflow: hidden; margin: 5px 0 3px; }
+.g-bar div { height: 100%; background: var(--accent); }
+.g-tag { display: inline-block; font-size: 12px; font-weight: 700; padding: 0 6px; margin-left: 6px; border-radius: 6px; background: var(--note); }
+.g-tag.good { color: var(--good); } .g-tag.bad { color: var(--bad); }
+.g-chart { width: 100%; height: 90px; margin-top: 6px; }
+.g-line { fill: none; stroke: var(--accent); stroke-width: 2; vector-effect: non-scaling-stroke; }
+.g-grid { stroke: var(--line); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.g-lbl { font-size: 8px; fill: var(--muted); }
+.g-plan, .g-weak, .g-log, .g-rules { margin: 4px 0; padding-left: 4px; list-style: none; }
+.g-plan li, .g-weak li, .g-log li { margin: 5px 0; }
+.g-plan li.done { color: var(--muted); }
+.g-rules { padding-left: 16px; list-style: disc; font-size: 13.5px; }
+.g-log b.up { color: var(--good); } .g-log b.down { color: var(--bad); }
+.feedback.ok { color: var(--good); font-weight: 700; }
+.feedback.no { color: var(--bad); font-weight: 700; }
