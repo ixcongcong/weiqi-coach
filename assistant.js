@@ -44,7 +44,7 @@ function allGroups(b) {
 }
 
 const names = (b, pts, max) => pts.slice(0, max || 40).map(p => b.name(p)).join('、') + (pts.length > (max || 40) ? ` 等 ${pts.length} 个` : '');
-const whoName = c => (S.mode === 'play' ? (c === S.game.human ? '你' : 'AI') : colorName(c));
+const whoName = c => (S.mode === 'play' && S.game.opp !== 'human' ? (c === S.game.human ? '你' : 'AI') : colorName(c));
 
 /** 当前问题所针对的局面、视角和分析。 */
 function assistantContext() {
@@ -208,7 +208,7 @@ const INTENTS = [
     },
   },
   {
-    test: q => /为什么|这手|这步|刚才|讲解|什么意思/.test(q) && S.mode === 'play',
+    test: q => /为什么|这手|这步|刚才|讲解|什么意思/.test(q) && !/这盘|本局|总结|整盘/.test(q) && S.mode === 'play',
     run(ctx) {
       const cm = ctx.lastComment;
       if (!cm) return null;
@@ -276,6 +276,7 @@ function buildFacts(ctx) {
     lines.push(`【地盘估计】${ctx.meName}的空点 ${mine.length} 个 [${names(b, mine, 30)}]；对方的空点 ${theirs.length} 个 [${names(b, theirs, 30)}]。`);
     lines.push(`【引擎推荐】${ctx.a.cands.slice(0, 3).map(c => `${b.name(c.move)}（走后胜率 ${pct(c.wr)}）`).join('，')}（这是轮到${colorName(ctx.a.toPlay)}时的推荐）`);
   }
+  if (S.mode === 'play' && S.summary && (S.result || S.scoring)) lines.push(`【本局总结】\n${S.summary.facts}`);
   const cm = ctx.lastComment;
   if (cm) {
     lines.push(`【学生上一手的讲解】第${cm.j + 1}手 ${cm.name}${cm.q ? `，评价：${cm.q.label}` : ''}。${(cm.reasons || []).join(' ')}${cm.best ? ` 更好的下法：${cm.best.name}。` : ''}`);
@@ -331,19 +332,45 @@ async function pickFreeModel() {
   return orFree[0];
 }
 
-async function openAICompatible(url, key, model, messages, extraHeaders) {
-  const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 90000);
+/** 调用 OpenAI 兼容的接口（OpenRouter / DeepSeek）。给了 onDelta 就边生成边回调，答案一段段出来。 */
+async function openAICompatible(url, key, model, messages, extraHeaders, onDelta, extraBody) {
+  const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 180000);
   try {
     const r = await fetch(url, {
       method: 'POST', signal: ctl.signal,
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}`, ...(extraHeaders || {}) },
-      body: JSON.stringify({ model, messages, temperature: 0.3, max_tokens: 2500 }),
+      body: JSON.stringify({ model, messages, temperature: 0.3, max_tokens: 3000, stream: true, ...(extraBody || {}) }),
     });
-    const d = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error((d.error && (d.error.message || d.error)) || `HTTP ${r.status}`);
-    const text = d.choices && d.choices[0] && d.choices[0].message && d.choices[0].message.content;
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      throw new Error((d.error && (d.error.message || d.error)) || `HTTP ${r.status}`);
+    }
+    const reader = r.body.getReader(), dec = new TextDecoder();
+    let buf = '', content = '', reasoning = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, i).trim();
+        buf = buf.slice(i + 1);
+        if (!line.startsWith('data:')) continue;
+        const data = line.slice(5).trim();
+        if (data === '[DONE]') continue;
+        let j;
+        try { j = JSON.parse(data); } catch (e) { continue; }
+        if (j.error) throw new Error(j.error.message || String(j.error));
+        const delta = j.choices && j.choices[0] && (j.choices[0].delta || j.choices[0].message);
+        if (!delta) continue;
+        if (delta.content) { content += delta.content; if (onDelta) onDelta(content.replace(/<think>[\s\S]*?(<\/think>|$)/g, '')); }
+        if (delta.reasoning) reasoning += delta.reasoning;
+        else if (delta.reasoning_content) reasoning += delta.reasoning_content;
+      }
+    }
+    const text = content.replace(/<think>[\s\S]*?<\/think>/g, '').trim() || reasoning.trim();
     if (!text) throw new Error('模型没有返回内容');
-    return text.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+    return text;
   } finally {
     clearTimeout(timer);
   }
@@ -370,18 +397,18 @@ const BACKENDS = [
   {
     id: 'openrouter', name: 'OpenRouter 免费模型',
     ready: async () => AI.useOR && !!AI.orKey && navigator.onLine,
-    async chat(messages) {
+    async chat(messages, onDelta) {
       const model = await pickFreeModel();
+      const call = m => openAICompatible('https://openrouter.ai/api/v1/chat/completions', AI.orKey, m, messages,
+        { 'X-Title': 'Yi Go Coach' }, onDelta, { reasoning: { effort: 'low' } });
       try {
-        const text = await openAICompatible('https://openrouter.ai/api/v1/chat/completions', AI.orKey, model, messages, { 'X-Title': 'Yi Go Coach' });
-        return { text, src: `OpenRouter 免费模型（${model}）` };
+        return { text: await call(model), src: `OpenRouter 免费模型（${model}）` };
       } catch (e) {
         // 免费模型经常限流：换下一个免费模型再试一次
         if (!AI.orModel && orFree && orFree.length > 1) {
           const next = orFree[1];
           orFree.push(orFree.shift());
-          const text = await openAICompatible('https://openrouter.ai/api/v1/chat/completions', AI.orKey, next, messages, { 'X-Title': 'Yi Go Coach' });
-          return { text, src: `OpenRouter 免费模型（${next}）` };
+          return { text: await call(next), src: `OpenRouter 免费模型（${next}）` };
         }
         throw e;
       }
@@ -390,8 +417,8 @@ const BACKENDS = [
   {
     id: 'deepseek', name: 'DeepSeek',
     ready: async () => AI.useDS && !!AI.dsKey && navigator.onLine,
-    async chat(messages) {
-      const text = await openAICompatible('https://api.deepseek.com/chat/completions', AI.dsKey, 'deepseek-chat', messages);
+    async chat(messages, onDelta) {
+      const text = await openAICompatible('https://api.deepseek.com/chat/completions', AI.dsKey, 'deepseek-chat', messages, null, onDelta);
       return { text, src: 'DeepSeek（deepseek-chat）' };
     },
   },
@@ -407,7 +434,7 @@ async function anyLLM() {
   return false;
 }
 
-async function llmAnswer(question) {
+async function llmAnswer(question, onDelta) {
   const ctx = assistantContext();
   const history = [];
   for (const m of Q.log.slice(-5, -1)) {
@@ -423,7 +450,7 @@ async function llmAnswer(question) {
   for (const bk of orderedBackends()) {
     if (!(await bk.ready())) continue;
     try {
-      const r = await bk.chat(messages);
+      const r = await bk.chat(messages, onDelta);
       return { ...r, ctx };
     } catch (e) {
       errors.push(`${bk.name}：${e.message || e}`);
@@ -442,9 +469,16 @@ function mdLite(text) {
 }
 
 async function askLLM(q) {
-  askShow(q, `<p>正在思考…（${esc((await firstReadyName()) || '大模型')}）</p>`);
+  const who = (await firstReadyName()) || '大模型';
+  askShow(q, `<p>正在思考…（${esc(who)}，推理模型可能要等十几秒）</p>`, '', true);
+  let pending = 0;
+  const onDelta = text => {
+    cancelAnimationFrame(pending);
+    pending = requestAnimationFrame(() => askShow(q, `<p>${mdLite(text)}</p>`, `${who} 正在回答…`, true));
+  };
   try {
-    const r = await llmAnswer(q);
+    const r = await llmAnswer(q, onDelta);
+    cancelAnimationFrame(pending);
     if (!r) return false;
     const pts = coordsIn(r.text, r.ctx.b);
     Q.mark = pts.length ? pts : Q.mark;
@@ -572,8 +606,9 @@ $('btnAITest').addEventListener('click', async () => {
   for (const bk of orderedBackends()) {
     if (!(await bk.ready())) { lines.push(`${bk.name}：未启用或不可用`); continue; }
     try {
-      const r = await bk.chat([{ role: 'system', content: '用一句简体中文回答。' }, { role: 'user', content: '围棋里的“气”是什么？' }]);
-      lines.push(`${bk.name}：可用。${r.src}：${r.text.slice(0, 60)}…`);
+      const t0 = Date.now();
+      const r = await bk.chat([{ role: 'system', content: '用一句简体中文回答，不超过 30 个字。' }, { role: 'user', content: '围棋里的“气”是什么？' }]);
+      lines.push(`${bk.name}：可用（${((Date.now() - t0) / 1000).toFixed(1)} 秒）。${r.src}：${r.text.slice(0, 60)}`);
     } catch (e) {
       lines.push(`${bk.name}：失败（${e.message || e}）`);
     }
