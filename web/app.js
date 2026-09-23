@@ -2,7 +2,7 @@
 /* 围棋对战教练：对战、学习（课程与名局）、练习、提问。
  * 引擎在 engine.js；蒙特卡洛计算在 Web Worker 里进行，局部死活计算在主线程（很快）。 */
 
-const APP_VERSION = '2.5';
+const APP_VERSION = '2.6';
 const G = window.Go;
 const { EMPTY, BLACK, WHITE, PASS, NONE, RESIGN } = G;
 const GAMES = window.GAMES || [];
@@ -23,8 +23,35 @@ const BUDGET = {
 };
 const STUDY_BUDGET = { playouts: 2500, ms: 2000, own: 200 };
 const FINAL_OWN = { 9: 1200, 13: 900, 19: 600 };
-const STORE_KEY = 'weiqi-coach-v1';
-const RECORDS_KEY = 'weiqi-coach-records';
+const STORE_KEY_BASE = 'weiqi-coach-v1';
+const RECORDS_KEY_BASE = 'weiqi-coach-records';
+const USERS_KEY = 'weiqi-coach-users';
+
+// 用户：每个用户的对局、进度分开保存；用户 ID 与家里“弈 · 学习中心”的用户 ID 相同
+let USERS = null;
+function newUserId() { return `coach-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`; }
+function saveUsers() { try { localStorage.setItem(USERS_KEY, JSON.stringify(USERS)); } catch (e) { /* 忽略 */ } }
+function loadUsers() {
+  try { USERS = JSON.parse(localStorage.getItem(USERS_KEY) || 'null'); } catch (e) { USERS = null; }
+  if (USERS && USERS.list && USERS.list.length) return;
+  // 第一次使用（或从旧版本升级）：旧数据归到第一个用户；旧版同步过的学习中心用户直接沿用
+  let id = newUserId(), name = '我';
+  try {
+    const old = JSON.parse(localStorage.getItem(STORE_KEY_BASE) || 'null');
+    if (old && old.sync && old.sync.userId) { id = old.sync.userId; name = old.sync.userName || name; }
+    for (const k of [STORE_KEY_BASE, RECORDS_KEY_BASE]) {
+      const v = localStorage.getItem(k);
+      if (v !== null && localStorage.getItem(`${k}:${id}`) === null) localStorage.setItem(`${k}:${id}`, v);
+    }
+  } catch (e) { /* 忽略 */ }
+  const now = new Date().toISOString();
+  USERS = { current: id, list: [{ id, name, createdAt: now, updatedAt: now }] };
+  saveUsers();
+}
+function curUser() { return USERS.list.find(u => u.id === USERS.current) || USERS.list[0]; }
+const storeKey = () => `${STORE_KEY_BASE}:${curUser().id}`;
+const recordsKey = () => `${RECORDS_KEY_BASE}:${curUser().id}`;
+loadUsers();
 const LEVEL_NAMES = { 1: '第 1 级：吃子入门', 2: '第 2 级：吃子技巧', 3: '第 3 级：对杀与死活' };
 
 const $ = id => document.getElementById(id);
@@ -163,11 +190,11 @@ const S = {
   ghost: NONE,
   pendingTap: NONE,
   done: { lessons: {}, problems: {}, yi: {} },
-  sync: { server: '', userId: '', userName: '', last: '' },
+  sync: { server: '', on: false, last: '' },
 };
 
 // 提问
-const Q = { open: false, pick: null, seq: 0, mark: null };
+const Q = { open: false, pick: null, seq: 0, mark: null, area: null, log: [] };
 
 // 学习（课程 + 名局）
 const T = {
@@ -199,7 +226,7 @@ function rebuild() { S.board = boardAt(S.history.length); }
 
 function save() {
   try {
-    localStorage.setItem(STORE_KEY, JSON.stringify({
+    localStorage.setItem(storeKey(), JSON.stringify({
       mode: S.mode, game: S.game, prefs: S.prefs, setup: S.setup, history: S.history,
       result: S.scoring ? null : S.result, comments: S.comments, done: S.done, sync: S.sync,
       study: { gi: T.gi, idx: T.idx, cat: T.cat, last: T.last }, practice: { i: P.i },
@@ -211,7 +238,7 @@ function save() {
 function load() {
   let first = true;
   try {
-    const d = JSON.parse(localStorage.getItem(STORE_KEY) || 'null');
+    const d = JSON.parse(localStorage.getItem(storeKey()) || 'null');
     if (d) {
       first = false;
       Object.assign(S.game, d.game);
@@ -423,9 +450,9 @@ function playMove(m, internal) {
   const mover = S.board.toPlay;
   if (!S.board.play(m)) return false;
   S.history.push(m);
-  if (S.history.length % 10 === 0) recordGame('未下完');
   S.hint = null;
   Q.mark = null;
+  Q.area = null;
   S.pendingTap = NONE;
   save();
   if (captureRule()) {
@@ -499,6 +526,8 @@ async function makeComment(j) {
   if (you && top && !isBest && delta >= 0.03) {
     cm.best = { move: top.move, name: pre.name(top.move), wr: top.wr, reasons: null };
   }
+  cm.gain = gainPoints(pre, c, A.own, B.own);
+  if (cm.gain.length) cm.reasons.push(`这手之后更可能变成${me}地盘的点：${cm.gain.slice(0, 12).join('、')}${cm.gain.length > 12 ? ' 等' : ''}（共 ${cm.gain.length} 个，点“在棋盘上看”）。`);
   S.comments[j] = cm;
   save();
   render();
@@ -511,6 +540,17 @@ async function makeComment(j) {
     save();
     render();
   }
+}
+
+/** 这手棋让哪些点明显更偏向下棋的一方（“得到的目”在哪里）。返回坐标名。 */
+function gainPoints(pre, c, ownB, ownA) {
+  const sgn = c === BLACK ? 1 : -1, out = [];
+  for (let p = 0; p < pre.size; p++) {
+    if (pre.b[p] === G.BORDER || pre.b[p] === c) continue;
+    const b0 = ownB[p] * sgn, a0 = ownA[p] * sgn;
+    if (a0 - b0 > 0.35 && a0 > 0.3) out.push(p);
+  }
+  return out.map(p => pre.name(p));
 }
 
 /** 吃子棋的讲解：只讲吃子、叫吃、逃子这些手段。 */
@@ -558,7 +598,6 @@ async function showHint() {
 // ---------------- 对战：操作 ----------------
 
 function newGame(opts) {
-  if (S.history.length && !S.result && !S.scoring) recordGame('未下完');
   cancelWork();
   Object.assign(S.game, opts);
   S.setup = G.handicapPoints(S.game.size, S.game.handicap);
@@ -621,33 +660,37 @@ function resign() {
 
 let RECORDS = [];
 function loadRecords() {
-  try { RECORDS = JSON.parse(localStorage.getItem(RECORDS_KEY) || '[]'); } catch (e) { RECORDS = []; }
+  try { RECORDS = JSON.parse(localStorage.getItem(recordsKey()) || '[]'); } catch (e) { RECORDS = []; }
+  // 只保留下完的对局
+  RECORDS = RECORDS.filter(r => r && r.result && r.result !== '未下完');
 }
 function saveRecords() {
-  try { localStorage.setItem(RECORDS_KEY, JSON.stringify(RECORDS)); } catch (e) { toast('本机存储空间不足，对局记录没有保存成功'); }
+  try { localStorage.setItem(recordsKey(), JSON.stringify(RECORDS)); } catch (e) { toast('本机存储空间不足，对局记录没有保存成功'); }
 }
 
 /** 把当前这盘棋存成一条记录（同一盘棋反复调用只会更新同一条）。 */
-function recordGame(status) {
-  if (!S.history.length) return;
+function recordGame() {
+  if (!S.history.length || (!S.result && !S.scoring)) return;
   const b0 = new G.Board(S.game.size), sg2 = p => (p === PASS ? 'tt' : String.fromCharCode(97 + b0.x(p)) + String.fromCharCode(97 + b0.y(p)));
   if (!S.game.recId) S.game.recId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
   const g = S.game, b = S.board;
-  let result = status;
+  const pvp = g.opp === 'human';
+  let result = '';
   if (S.result) result = S.result.text;
-  else if (S.scoring) result = `${S.scoring.winner() === BLACK ? '黑' : '白'}胜 ${Math.abs(S.scoring.diff())}（${S.scoring.winner() === g.human ? '你赢了' : 'AI 赢了'}）`;
+  else if (S.scoring) result = `${S.scoring.winner() === BLACK ? '黑' : '白'}胜 ${Math.abs(S.scoring.diff())}${pvp ? '' : `（${S.scoring.winner() === g.human ? '你赢了' : 'AI 赢了'}）`}`;
   const rec = {
     id: g.recId, date: new Date().toISOString(), size: g.size, human: g.human, rule: g.rule, captureN: g.captureN,
-    handicap: g.handicap, komi: g.komi, level: LEVELS[S.prefs.level].name, target: S.prefs.target,
+    handicap: g.handicap, komi: g.komi, level: pvp ? '真人' : LEVELS[S.prefs.level].name, target: S.prefs.target, opp: pvp ? 'human' : 'ai',
     ab: S.setup.map(sg2).join(''), moves: S.history.map(sg2).join(''), moveCount: S.history.length,
-    result, won: S.result ? S.result.winner === g.human : S.scoring ? S.scoring.winner() === g.human : null,
+    result, won: pvp ? null : S.result ? S.result.winner === g.human : S.scoring ? S.scoring.winner() === g.human : null,
+    winner: S.result ? S.result.winner : S.scoring ? S.scoring.winner() : 0,
     caps: [b.capB, b.capW],
   };
   const i = RECORDS.findIndex(r => r.id === rec.id);
   if (i >= 0) RECORDS[i] = Object.assign(RECORDS[i], rec); else RECORDS.unshift(rec);
   saveRecords();
   fillGameSelect();
-  if (status === undefined && S.sync.userId) syncNow(true);
+  if (S.sync.on) syncNow(true);
 }
 
 function recordToGame(r) {
@@ -656,8 +699,11 @@ function recordToGame(r) {
   const you = r.human === BLACK ? '黑' : '白';
   return {
     kind: 'mine', id: r.id, group: '我的对局（保存在本机）',
-    title: `${when} · ${r.size}路${r.rule === 'capture' ? ` 吃子棋（${r.captureN} 子）` : ''} · 你执${you} · ${r.won === true ? '赢' : r.won === false ? '输' : '未下完'}`,
-    size: r.size, komi: r.komi, black: r.human === BLACK ? '你' : `AI（${r.level}）`, white: r.human === WHITE ? '你' : `AI（${r.level}）`,
+    title: r.opp === 'human'
+      ? `${when} · ${r.size}路${r.rule === 'capture' ? ` 吃子棋（${r.captureN} 子）` : ''} · 真人对战 · ${r.winner === BLACK ? '黑胜' : r.winner === WHITE ? '白胜' : ''}`
+      : `${when} · ${r.size}路${r.rule === 'capture' ? ` 吃子棋（${r.captureN} 子）` : ''} · 你执${you} · ${r.won === true ? '赢' : '输'}`,
+    size: r.size, komi: r.komi,
+    black: r.opp === 'human' ? '黑方' : r.human === BLACK ? '你' : `AI（${r.level}）`, white: r.opp === 'human' ? '白方' : r.human === WHITE ? '你' : `AI（${r.level}）`,
     year: d.getFullYear(), result: r.result || '未下完', notes: {},
     intro: `你在 ${d.toLocaleString('zh-CN')} 下的一盘棋，共 ${r.moveCount} 手，结果：${r.result || '未下完'}。一步步回看，留意胜率大幅下降的地方；打开“猜棋”，看看自己能不能找到 AI 推荐的下法。`,
     ab: r.ab, aw: '', first: r.ab ? 'W' : 'B', moves: r.moves,
@@ -737,7 +783,7 @@ function yiProgressPayload() {
 }
 
 function applySyncResult(data) {
-  const uid = S.sync.userId;
+  const uid = curUser().id;
   const prog = data.progress && data.progress[uid];
   if (prog) {
     for (const [id, r] of Object.entries(prog.exerciseProgress || {})) if (r && r.mastered) S.done.yi[id] = true;
@@ -763,17 +809,24 @@ function applySyncResult(data) {
 
 let syncing = false;
 async function syncNow(quiet) {
-  if (syncing || !S.sync.userId) return false;
+  if (syncing) return false;
   syncing = true;
+  const u = curUser();
   try {
     const coachDone = { lessons: {}, problems: S.done.problems, yi: S.done.yi };
     for (const [k, v] of Object.entries(S.done.lessons)) if (!/^yi\d+$/.test(k)) coachDone.lessons[k] = v;
     const data = await syncPost(syncServer(), {
-      schema: 2, client: 'weiqi-coach', profiles: [], progress: { [S.sync.userId]: yiProgressPayload() },
-      coach: { userId: S.sync.userId, records: RECORDS, done: coachDone },
+      schema: 2, client: 'weiqi-coach',
+      profiles: [{ id: u.id, name: u.name, createdAt: u.createdAt || new Date().toISOString(), updatedAt: u.updatedAt || new Date().toISOString() }],
+      progress: { [u.id]: yiProgressPayload() },
+      coach: { userId: u.id, records: RECORDS, done: coachDone },
     }, quiet ? 4000 : 8000);
+    const prof = (data.profiles || []).find(p => p.id === u.id);
+    if (prof && prof.name !== u.name && (prof.updatedAt || '') > (u.updatedAt || '')) { u.name = prof.name; u.updatedAt = prof.updatedAt; saveUsers(); }
     const added = applySyncResult(data);
-    if (!quiet) toast(`同步完成：共 ${RECORDS.length} 盘对局${added ? `（新增 ${added} 盘）` : ''}`);
+    S.sync.on = true;
+    save();
+    if (!quiet) toast(`同步完成：${u.name}，共 ${RECORDS.length} 盘对局${added ? `（新增 ${added} 盘）` : ''}`);
     else if (added) toast(`已从家里同步 ${added} 盘对局`);
     render();
     return true;
@@ -793,53 +846,79 @@ function syncErrorText(e) {
 
 function openSync() {
   $('syncServer').value = syncServer();
-  $('syncStatus').textContent = S.sync.userId
-    ? `当前用户：${S.sync.userName}${S.sync.last ? `，上次同步：${new Date(S.sync.last).toLocaleString('zh-CN')}` : ''}`
-    : '先点“连接”，再选择你的用户。';
-  $('syncUserRow').hidden = $('syncNewRow').hidden = true;
+  $('syncStatus').textContent = `当前用户：${curUser().name}${S.sync.last ? `，上次同步：${new Date(S.sync.last).toLocaleString('zh-CN')}` : '，还没有同步过'}。要换用户，点右上角的用户名。`;
   $('dlgSync').showModal();
-  if (S.sync.userId) syncConnect();
 }
 
-async function syncConnect() {
+async function syncFromDialog() {
   const server = $('syncServer').value.trim().replace(/\/+$/, '');
-  $('syncStatus').textContent = '正在连接…';
-  try {
-    const data = await syncPost(server, { schema: 2, profiles: [], progress: {} });
-    S.sync.server = server === DEFAULT_SYNC_SERVER ? '' : server;
-    const sel = $('syncUser');
-    sel.innerHTML = data.profiles.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('') + '<option value="__new">新建一个用户…</option>';
-    sel.value = S.sync.userId && data.profiles.some(p => p.id === S.sync.userId) ? S.sync.userId : (data.profiles[0] ? data.profiles[0].id : '__new');
-    $('syncUserRow').hidden = false;
-    $('syncNewRow').hidden = sel.value !== '__new';
-    $('syncStatus').textContent = `已连接学习中心，共 ${data.profiles.length} 个用户。选好用户后点“立即同步”。`;
-    save();
-  } catch (e) {
-    $('syncStatus').textContent = `连接失败：${syncErrorText(e)}`;
-  }
-}
-
-async function syncChooseAndRun() {
-  const sel = $('syncUser');
-  if ($('syncUserRow').hidden) { await syncConnect(); if ($('syncUserRow').hidden) return; }
-  if (sel.value === '__new') {
-    const name = $('syncNewName').value.trim();
-    if (!name) { $('syncStatus').textContent = '请填写新用户的名字。'; return; }
-    const id = `coach-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`, now = new Date().toISOString();
-    try {
-      await syncPost(syncServer(), { schema: 2, profiles: [{ id, name, createdAt: now, updatedAt: now }], progress: {} });
-    } catch (e) { $('syncStatus').textContent = `新建用户失败：${syncErrorText(e)}`; return; }
-    S.sync.userId = id;
-    S.sync.userName = name;
-  } else {
-    S.sync.userId = sel.value;
-    S.sync.userName = sel.options[sel.selectedIndex].textContent;
-  }
+  S.sync.server = server === DEFAULT_SYNC_SERVER ? '' : server;
   save();
   $('syncStatus').textContent = '正在同步…';
   const ok = await syncNow(false);
-  $('syncStatus').textContent = ok ? `同步完成：用户 ${S.sync.userName}，共 ${RECORDS.length} 盘对局。以后在家里打开本应用会自动同步。` : '同步没有成功，看上面的提示。';
+  $('syncStatus').textContent = ok ? `同步完成：${curUser().name}，共 ${RECORDS.length} 盘对局。以后在家里打开本应用会自动同步。` : '同步没有成功，看上面的提示。';
 }
+
+// ---------------- 用户 ----------------
+
+function openUsers() {
+  const box = $('userList');
+  box.innerHTML = USERS.list.map(u => `<button type="button" data-uid="${esc(u.id)}"${u.id === USERS.current ? ' class="on"' : ''}>${esc(u.name)}${u.id === USERS.current ? '（当前）' : ''}</button>`).join('');
+  $('userRename').value = curUser().name;
+  $('userStatus').textContent = '';
+  $('dlgUser').showModal();
+}
+
+function switchUser(id) {
+  if (id === USERS.current) return;
+  save();
+  USERS.current = id;
+  saveUsers();
+  location.reload();
+}
+
+$('userList').addEventListener('click', e => {
+  const r = e.target.closest('[data-remote]');
+  if (r) {
+    const now = new Date().toISOString();
+    USERS.list.push({ id: r.dataset.remote, name: r.dataset.name, createdAt: now, updatedAt: '1970-01-01T00:00:00.000Z' });
+    // 切换过去以后自动同步一次，拿回这个用户在学习中心的记录和进度
+    try { localStorage.setItem(`${STORE_KEY_BASE}:${r.dataset.remote}`, JSON.stringify({ sync: { on: true, server: S.sync.server } })); } catch (err) { /* 忽略 */ }
+    switchUser(r.dataset.remote);
+    return;
+  }
+  const b = e.target.closest('[data-uid]');
+  if (b) switchUser(b.dataset.uid);
+});
+$('btnUserAdd').addEventListener('click', () => {
+  const name = $('userNewName').value.trim();
+  if (!name) { $('userStatus').textContent = '请先填写名字。'; return; }
+  const now = new Date().toISOString(), id = newUserId();
+  USERS.list.push({ id, name, createdAt: now, updatedAt: now });
+  switchUser(id);
+});
+$('btnUserRename').addEventListener('click', () => {
+  const name = $('userRename').value.trim();
+  if (!name) return;
+  const u = curUser();
+  u.name = name;
+  u.updatedAt = new Date().toISOString();
+  saveUsers();
+  render();
+  openUsers();
+});
+$('btnUserFetch').addEventListener('click', async () => {
+  $('userStatus').textContent = '正在连接家里的学习中心…';
+  try {
+    const data = await syncPost(syncServer(), { schema: 2, profiles: [], progress: {} });
+    const extra = data.profiles.filter(p => !USERS.list.some(u => u.id === p.id));
+    if (!extra.length) { $('userStatus').textContent = `学习中心的 ${data.profiles.length} 个用户都已经在这台设备上了。`; return; }
+    $('userList').insertAdjacentHTML('beforeend', extra.map(p => `<button type="button" data-remote="${esc(p.id)}" data-name="${esc(p.name)}">添加并切换到：${esc(p.name)}（学习中心）</button>`).join(''));
+    $('userStatus').textContent = '点上面带“学习中心”的用户，就会把它加到这台设备并切换过去，然后自动同步它的记录和进度。';
+  } catch (e) {
+    $('userStatus').textContent = `连接失败：${syncErrorText(e)}`;
+  }
+});
 
 // ---------------- 回看（不改变对局） ----------------
 
@@ -979,6 +1058,7 @@ function studyGo(idx) {
   const n = gameMoves(g).length;
   T.idx = clamp(idx, 0, n);
   Q.mark = null;
+  Q.area = null;
   if (g.kind === 'lesson' && T.idx === n && !S.done.lessons[g.id]) {
     S.done.lessons[g.id] = true;
     fillGameSelect();
@@ -1530,6 +1610,12 @@ function drawBoard() {
     }
   }
 
+  if (Q.area) {
+    ctx.fillStyle = 'rgba(21,101,192,.45)';
+    const h = cell * 0.22;
+    for (const p of Q.area) if (p >= 0 && p < b.size) ctx.fillRect(X(p) - h, Y(p) - h, 2 * h, 2 * h);
+  }
+
   if (Q.mark) {
     ctx.strokeStyle = '#1565c0';
     ctx.lineWidth = Math.max(2, r * 0.2);
@@ -1610,6 +1696,17 @@ canvas.addEventListener('pointerleave', e => {
 
 // ---------------- 侧栏 ----------------
 
+/** 顶部的胜率横条：左边标签、左边所占比例、右边标签；不给参数就隐藏。 */
+function setWr(left, frac, right, blackWhite) {
+  const box = $('wrBox');
+  if (left === undefined || frac === null || frac === undefined) { box.hidden = true; return; }
+  box.hidden = false;
+  box.classList.toggle('bw', !!blackWhite);
+  $('wrLeft').textContent = left;
+  $('wrRight').textContent = right;
+  $('wrFill').style.width = `${Math.round(frac * 100)}%`;
+}
+
 function humanWr() {
   const la = latestAnalysis(S.analyses, S.history.length);
   if (!la) return null;
@@ -1657,13 +1754,15 @@ function commentHtml(c) {
     if (c.best) {
       h += `<div class="better">更好的是 <b>${esc(c.best.name)}</b>（胜率约 ${pct(c.best.wr)}）${reasonsHtml(c.best.reasons)}</div>`;
     }
+    if (c.gain && c.gain.length) h += `<p><button class="small" data-gain="${c.j}">在棋盘上看这些目</button></p>`;
     if (c.q.cls === 'slow' || c.q.cls === 'bad') h += '<p class="note">点这条点评，可以回看当时的局面并试下。</p>';
     return h + '</div>';
   }
   const yourWr = c.wrNext !== undefined ? c.wrNext : 1 - c.wrAfter;
   return `<div class="cm ai${S.view === c.j ? ' viewing' : ''}" data-j="${c.j}">
     <div class="h"><b>${num}</b> AI 下 ${esc(c.name)}${c.eased ? ' <span class="note">（让棋）</span>' : ''}
-    <span class="wr">你的胜率 ${pct(yourWr)}</span></div>${reasonsHtml(c.reasons)}</div>`;
+    <span class="wr">你的胜率 ${pct(yourWr)}</span></div>${reasonsHtml(c.reasons)}
+    ${c.gain && c.gain.length ? `<p><button class="small" data-gain="${c.j}">在棋盘上看 AI 得到的点</button></p>` : ''}</div>`;
 }
 
 function reviewHtml() {
@@ -1768,6 +1867,7 @@ function practiceCoachHtml() {
 
 function render() {
   const mode = S.mode;
+  $('btnUser').textContent = curUser().name;
   $('tabPlay').classList.toggle('on', mode === 'play');
   $('tabStudy').classList.toggle('on', mode === 'study' && T.cat === 'learn');
   $('tabGames').classList.toggle('on', mode === 'study' && T.cat === 'games');
@@ -1779,7 +1879,7 @@ function render() {
 
   if (mode === 'study' && sg().kind === 'yi') {
     const g = sg();
-    $('wrText').textContent = '';
+    setWr();
     const doneN = GAMES.filter(x => x.kind === 'yi' && S.done.lessons[x.id]).length;
     $('status').textContent = `《弈》第 ${g.num} / 54 课 · 已学 ${doneN} 课`;
     $('selGame').value = String(T.gi);
@@ -1796,7 +1896,7 @@ function render() {
     $('btnLsNext').disabled = !GAMES[T.gi + 1] || GAMES[T.gi + 1].kind !== 'lesson';
     const g = sg(), n = gameMoves(g).length;
     const la = latestAnalysis(T.analyses, T.idx);
-    $('wrText').textContent = la && g.kind !== 'lesson' ? `黑 ${pct(la.a.toPlay === BLACK ? la.a.wr : 1 - la.a.wr)}` : '';
+    if (la && g.kind !== 'lesson') { const bw = la.a.toPlay === BLACK ? la.a.wr : 1 - la.a.wr; setWr(`黑 ${pct(bw)}`, bw, `白 ${pct(1 - bw)}`, true); } else setWr();
     let st = `${g.title}　第 ${T.idx} / ${n} 手`;
     if (T.idx < n) st += ` · 下一手：${colorName(studyBoardAt(T.idx).toPlay)}`;
     if (T.guess) st += ` · 猜棋 ${T.hit}/${T.tried}`;
@@ -1811,7 +1911,7 @@ function render() {
     $('btnGuess').classList.toggle('on', T.guess);
     $('coach').innerHTML = studyCoachHtml();
   } else if (mode === 'practice') {
-    $('wrText').textContent = '';
+    setWr();
     $('status').textContent = '练习：黑先';
     $('selProblem').value = String(P.i);
     $('btnPbPrev').disabled = P.i === 0;
@@ -1820,10 +1920,10 @@ function render() {
   } else {
     if (captureRule()) {
       const b = S.board, me = S.game.human;
-      $('wrText').textContent = `吃子 ${me === BLACK ? b.capB : b.capW} : ${me === BLACK ? b.capW : b.capB}`;
+      setWr();
     } else {
       const hw = humanWr();
-      $('wrText').textContent = hw === null ? '' : `你 ${pct(hw)}`;
+      if (hw === null) setWr(); else setWr(`你 ${pct(hw)}`, hw, `AI ${pct(1 - hw)}`);
     }
     $('status').textContent = statusText();
     const my = canHumanMove();
@@ -1861,8 +1961,15 @@ function askContext() {
   return { b: S.board.copy(), getA: () => getAnalysis(k), me: S.game.human, meName: '你', komi: S.game.komi, budget: BUDGET[S.game.size] };
 }
 
-function askShow(q, html) {
-  $('askAnswer').innerHTML = `<div class="q">问：${esc(q)}</div>${html}`;
+/** 对话记录：同一个问题的“正在分析…”会被后来的答案替换。 */
+function askShow(q, html, src) {
+  const last = Q.log[Q.log.length - 1];
+  if (last && last.q === q && last.pending) Object.assign(last, { html, src, pending: /正在/.test(html) });
+  else Q.log.push({ q, html, src, pending: /正在/.test(html) });
+  if (Q.log.length > 30) Q.log.shift();
+  const box = $('askAnswer');
+  box.innerHTML = Q.log.map(m => `<div class="chat-q">${esc(m.q)}</div><div class="chat-a">${m.html}${m.src ? `<div class="note src">${esc(m.src)}</div>` : ''}</div>`).join('');
+  box.scrollTop = box.scrollHeight;
 }
 
 function openAsk(open) {
@@ -1872,7 +1979,7 @@ function openAsk(open) {
   $('askPanel').hidden = !open;
   $('btnAsk').classList.toggle('on', open);
   $('btnAsk2').classList.toggle('on', open);
-  if (open) $('askAnswer').innerHTML = '';
+  if (open && !Q.log.length) $('askAnswer').innerHTML = '<p class="note">可以问棋盘上的事：哪些是这块棋的气、哪些是我的地盘、刚才那手得到的目在哪、哪里是断点、我能吃掉哪块棋、哪块棋有危险、眼在哪……也可以问围棋知识。答案里提到的位置会在棋盘上标出来。</p>';
   syncAskChips();
   drawBoard();
 }
@@ -2200,10 +2307,9 @@ $('btnRvClear').addEventListener('click', () => { S.tries = []; S.tryNote = null
 $('btnRvBack').addEventListener('click', () => { exitReview(); render(); advance(); });
 $('btnHelp').addEventListener('click', () => $('dlgHelp').showModal());
 $('btnSync').addEventListener('click', openSync);
-$('btnSyncConnect').addEventListener('click', syncConnect);
-$('btnSyncNow').addEventListener('click', syncChooseAndRun);
-$('syncUser').addEventListener('change', e => { $('syncNewRow').hidden = e.target.value !== '__new'; });
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && S.sync.userId) syncNow(true); });
+$('btnSyncNow').addEventListener('click', syncFromDialog);
+$('btnUser').addEventListener('click', openUsers);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && S.sync.on) syncNow(true); });
 
 function bindPref(id, key, after) {
   $(id).addEventListener('change', e => {
@@ -2235,6 +2341,16 @@ $('coach').addEventListener('click', e => {
   }
   const go = e.target.closest('[data-go]');
   if (go) { stopAuto(); studyGo(+go.dataset.go); return; }
+  const gb = e.target.closest('[data-gain]');
+  if (gb) {
+    e.stopPropagation();
+    const cm = S.comments[+gb.dataset.gain], b = S.board;
+    Q.mark = null;
+    Q.area = (cm.gain || []).map(n => nameToPt(b, n)).filter(p => p >= 0);
+    toast(`棋盘上的蓝色方块：这手棋之后更可能变成${cm.you ? '你' : ' AI '}地盘的 ${Q.area.length} 个点`);
+    drawBoard();
+    return;
+  }
   const rec = e.target.closest('[data-rec]');
   if (rec) { if (rec.dataset.rec === 'export') exportRecords(); else $('fileImport').click(); return; }
   const les = e.target.closest('[data-lesson]');
@@ -2324,4 +2440,4 @@ else if (S.mode === 'play') {
   else advance();
 }
 if (firstRun) $('dlgWelcome').showModal();
-else if (S.sync.userId) setTimeout(() => syncNow(true), 1500);
+else if (S.sync.on) setTimeout(() => syncNow(true), 1500);

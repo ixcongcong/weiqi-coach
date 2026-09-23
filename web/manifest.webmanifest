@@ -1,6 +1,6 @@
 {
-  "name": "围棋对战教练",
-  "short_name": "围棋教练",
+  "name": "弈 · 围棋学习与对战",
+  "short_name": "弈",
   "description": "离线围棋对战与逐手讲解",
   "lang": "zh-CN",
   "start_url": "./",

@@ -6,26 +6,26 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
-  <meta name="apple-mobile-web-app-title" content="围棋教练">
+  <meta name="apple-mobile-web-app-title" content="弈">
   <meta name="theme-color" content="#f4ebdd">
   <meta name="color-scheme" content="light">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="apple-touch-icon" href="icons/icon-180.png">
   <link rel="icon" type="image/png" href="icons/icon-192.png">
   <link rel="stylesheet" href="app.css">
-  <title>围棋对战教练</title>
+  <title>弈</title>
 </head>
 <body>
 <div id="app">
   <header id="top">
-    <h1>围棋对战教练</h1>
+    <h1>弈</h1>
     <div class="tabs" role="tablist">
       <button id="tabPlay" role="tab">对战</button>
       <button id="tabStudy" role="tab">学习</button>
       <button id="tabGames" role="tab">棋谱</button>
       <button id="tabPractice" role="tab">练习</button>
     </div>
-    <b id="wrText"></b>
+    <button id="btnUser" class="small user-chip">我</button>
     <button id="btnSync" class="small">同步</button>
     <button id="btnHelp" class="small">说明</button>
   </header>
@@ -35,6 +35,10 @@
   </section>
 
   <aside id="side">
+    <div id="wrBox" hidden>
+      <div class="wr-labels"><span id="wrLeft"></span><span id="wrRight"></span></div>
+      <div class="wrbar"><div id="wrFill"></div></div>
+    </div>
     <div id="status"></div>
 
     <!-- 对战 -->
@@ -49,6 +53,7 @@
       <button id="btnResign">认输</button>
       <label class="chip"><input type="checkbox" id="chkCoach">讲解</label>
       <label class="chip"><input type="checkbox" id="chkHelper">新手辅助</label>
+      <label class="chip"><input type="checkbox" id="chkMarks">标出得失</label>
       <label class="chip"><input type="checkbox" id="chkCands">推荐点</label>
       <label class="chip"><input type="checkbox" id="chkConfirm">确认落子</label>
     </div>
@@ -89,6 +94,7 @@
 
     <div id="askPanel" class="cm ask" hidden>
       <div class="h"><b>提问</b><span class="wr">点问题，或直接输入</span>
+        <button id="btnAISettings" class="small">AI 设置</button>
         <button id="btnAskClose" class="small">关闭</button></div>
       <div class="ask-chips">
         <button data-ask="lead">现在谁领先？</button>
@@ -121,6 +127,12 @@
         <option value="capture1">吃子棋：先吃到 1 个子获胜</option>
         <option value="capture3">吃子棋：先吃到 3 个子获胜</option>
         <option value="capture5">吃子棋：先吃到 5 个子获胜</option>
+      </select>
+    </label>
+    <label class="row">对手
+      <select name="opp">
+        <option value="ai">AI（电脑）</option>
+        <option value="human">真人（两个人在同一台设备上轮流下）</option>
       </select>
     </label>
     <label class="row">棋盘
@@ -231,7 +243,7 @@
         <li>也可以输入文字，例如“什么是打劫”“怎么做活”。引擎是离线的，不能像聊天机器人那样理解任意问题。</li>
       </ul>
       <h3>同步</h3>
-      <p>点右上角“同步”，连接家里 Mac 上的“弈 · 学习中心”，选择你的用户（例如初九）。之后只要在家里的网络里打开本应用，就会自动同步：每一盘对局记录、练习进度、《弈》的课程进度都会和其它设备、《弈》App 合并，不会删除任何记录。第一次使用需要在设备上安装一次家里的证书，步骤在同步窗口里。</p>
+      <p>先点右上角的用户名选择用户（可以从家里学习中心添加已有用户，例如初九），再点“同步”。之后只要在家里的网络里打开本应用，就会自动同步：每一盘对局记录、练习进度、《弈》的课程进度都会和其它设备、《弈》App 合并，不会删除任何记录。第一次使用需要在设备上安装一次家里的证书，步骤在同步窗口里。</p>
       <h3>关于离线和更新</h3>
       <p>AI 是内置在程序里的围棋引擎，完全离线运行，不联网、不调用大模型。第一次打开后，所有文件都保存在设备上，关掉以后从主屏幕图标打开照样能用，不需要一直开着。有网时打开，会自动下载新版本，底部提示“新版本已下载好”时点“立即更新”即可。</p>
     </div>
@@ -244,9 +256,6 @@
     <h2>同步（家里的 Mac 学习中心）</h2>
     <p class="note">对局记录、练习进度和《弈》的课程进度，会和家里 Mac 上的“弈 · 学习中心”合并同步（只合并，不删除任何记录）。同一个用户在 iPad、手机、《弈》App 上的进度都会汇总在一起。</p>
     <label class="row">学习中心地址 <input id="syncServer" type="url" autocomplete="off" spellcheck="false"></label>
-    <div class="keys"><button type="button" id="btnSyncConnect">连接</button></div>
-    <label class="row" id="syncUserRow" hidden>用户 <select id="syncUser"></select></label>
-    <label class="row" id="syncNewRow" hidden>新用户名字 <input id="syncNewName" maxlength="24" placeholder="例如：初九"></label>
     <p id="syncStatus"></p>
     <details class="note">
       <summary>第一次使用：在这台设备上安装家里的证书</summary>
@@ -260,6 +269,50 @@
     <menu>
       <button value="close">关闭</button>
       <button type="button" id="btnSyncNow" class="primary">立即同步</button>
+    </menu>
+  </form>
+</dialog>
+
+<dialog id="dlgUser">
+  <form method="dialog">
+    <h2>用户</h2>
+    <p class="note">每个用户有自己的对局记录、练习和课程进度。用户和家里 Mac 上“弈 · 学习中心”的用户是同一套：在这里选中的用户，同步时就合并到学习中心里同名同 ID 的用户（例如《弈》App 里的初九）。</p>
+    <div id="userList" class="user-list"></div>
+    <label class="row">新用户 <input id="userNewName" maxlength="24" placeholder="名字，例如：小明"><button type="button" id="btnUserAdd" class="small">添加</button></label>
+    <label class="row">改名 <input id="userRename" maxlength="24"><button type="button" id="btnUserRename" class="small">保存</button></label>
+    <div class="keys"><button type="button" id="btnUserFetch">从家里学习中心添加已有用户</button></div>
+    <p id="userStatus" class="note"></p>
+    <menu><button value="close" class="primary">完成</button></menu>
+  </form>
+</dialog>
+
+<dialog id="dlgAI">
+  <form method="dialog">
+    <h2>AI 老师设置</h2>
+    <p class="note">关于棋盘的精确问题（气、地盘、断点、能吃的棋……）由本机引擎离线回答。其它问题交给大模型，并附上引擎算好的局面事实。按下面的顺序尝试，前一个不可用就用下一个。</p>
+    <label class="row">优先顺序
+      <select id="aiOrder">
+        <option value="openrouter,local,deepseek">OpenRouter 免费 → 家里 Mac → DeepSeek</option>
+        <option value="local,openrouter,deepseek">家里 Mac → OpenRouter 免费 → DeepSeek</option>
+        <option value="deepseek,openrouter,local">DeepSeek → OpenRouter 免费 → 家里 Mac</option>
+      </select>
+    </label>
+    <h3>OpenRouter（免费模型）</h3>
+    <label class="row"><input type="checkbox" id="aiUseOR"> 启用</label>
+    <label class="row">API 密钥 <input id="aiORKey" type="password" autocomplete="off" placeholder="sk-or-…"></label>
+    <label class="row">模型 <select id="aiORModel"></select></label>
+    <h3>家里 Mac 的本地模型（Ollama）</h3>
+    <label class="row"><input type="checkbox" id="aiUseLocal"> 启用</label>
+    <p id="aiLocalState" class="note"></p>
+    <h3>DeepSeek（付费，很便宜）</h3>
+    <label class="row"><input type="checkbox" id="aiUseDS"> 启用</label>
+    <label class="row">API 密钥 <input id="aiDSKey" type="password" autocomplete="off" placeholder="sk-…"></label>
+    <p class="note">密钥只保存在这台设备的浏览器里，不会同步到学习中心或别的地方。</p>
+    <pre id="aiTestOut" class="note"></pre>
+    <menu>
+      <button type="button" id="btnAITest">测试</button>
+      <button value="close">取消</button>
+      <button type="button" id="btnAISave" class="primary">保存</button>
     </menu>
   </form>
 </dialog>
@@ -280,5 +333,6 @@
 <script src="problems.js"></script>
 <script src="faq.js"></script>
 <script src="app.js"></script>
+<script src="assistant.js"></script>
 </body>
 </html>
