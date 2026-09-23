@@ -2,7 +2,7 @@
 /* 围棋对战教练：对战、学习（课程与名局）、练习、提问。
  * 引擎在 engine.js；蒙特卡洛计算在 Web Worker 里进行，局部死活计算在主线程（很快）。 */
 
-const APP_VERSION = '2.3';
+const APP_VERSION = '2.4';
 const G = window.Go;
 const { EMPTY, BLACK, WHITE, PASS, NONE, RESIGN } = G;
 const GAMES = window.GAMES || [];
@@ -163,6 +163,7 @@ const S = {
   ghost: NONE,
   pendingTap: NONE,
   done: { lessons: {}, problems: {}, yi: {} },
+  sync: { server: '', userId: '', userName: '', last: '' },
 };
 
 // 提问
@@ -199,7 +200,7 @@ function save() {
   try {
     localStorage.setItem(STORE_KEY, JSON.stringify({
       mode: S.mode, game: S.game, prefs: S.prefs, setup: S.setup, history: S.history,
-      result: S.scoring ? null : S.result, comments: S.comments, done: S.done,
+      result: S.scoring ? null : S.result, comments: S.comments, done: S.done, sync: S.sync,
       study: { gi: T.gi, idx: T.idx }, practice: { i: P.i },
     }));
   } catch (e) { /* 存储不可用时忽略 */ }
@@ -219,6 +220,7 @@ function load() {
       S.result = d.result || null;
       S.comments = d.comments || {};
       S.done = Object.assign({ lessons: {}, problems: {}, yi: {} }, d.done || {});
+      Object.assign(S.sync, d.sync || {});
       S.mode = ['play', 'study', 'practice'].includes(d.mode) ? d.mode : 'play';
       if (d.study) {
         T.gi = clamp(d.study.gi | 0, 0, Math.max(0, GAMES.length - 1));
@@ -642,6 +644,7 @@ function recordGame(status) {
   if (i >= 0) RECORDS[i] = Object.assign(RECORDS[i], rec); else RECORDS.unshift(rec);
   saveRecords();
   fillGameSelect();
+  if (status === undefined && S.sync.userId) syncNow(true);
 }
 
 function recordToGame(r) {
@@ -693,6 +696,146 @@ function importRecords(file) {
     }
   };
   fr.readAsText(file);
+}
+
+// ---------------- 同步（家里 Mac 上的“弈 · 学习中心”） ----------------
+
+const DEFAULT_SYNC_SERVER = 'https://VincentdeMac-mini.local:8767';
+
+function syncServer() {
+  if (S.sync.server) return S.sync.server.replace(/\/+$/, '');
+  // 从学习中心本身打开时，直接用当前地址
+  if (location.protocol === 'https:' && location.pathname.startsWith('/coach/')) return location.origin;
+  return DEFAULT_SYNC_SERVER;
+}
+
+async function syncPost(server, payload, ms) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), ms || 6000);
+  try {
+    const res = await fetch(`${server}/api/v2/sync`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload), signal: ctl.signal, cache: 'no-store',
+    });
+    const data = await res.json();
+    if (!res.ok || data.service !== 'go-learning-lan') throw new Error(data.error || `学习中心返回 ${res.status}`);
+    return data;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** 本机的《弈》进度，转成学习中心的格式。时间戳故意设得很早：只补充已完成的内容，不改动当前学到第几课。 */
+function yiProgressPayload() {
+  const now = new Date().toISOString(), ex = {};
+  for (const id of Object.keys(S.done.yi)) ex[id] = { mastered: true, attempts: 1, mistakes: 0, answer: '', updatedAt: now };
+  const completed = Object.keys(S.done.lessons).filter(k => /^yi\d+$/.test(k)).map(k => +k.slice(2));
+  return { completedLessons: completed, exerciseProgress: ex, updatedAt: '1970-01-01T00:00:00.000Z' };
+}
+
+function applySyncResult(data) {
+  const uid = S.sync.userId;
+  const prog = data.progress && data.progress[uid];
+  if (prog) {
+    for (const [id, r] of Object.entries(prog.exerciseProgress || {})) if (r && r.mastered) S.done.yi[id] = true;
+    for (const n of prog.completedLessons || []) S.done.lessons[`yi${n}`] = true;
+  }
+  let added = 0;
+  if (data.coach && data.coach.userId === uid) {
+    for (const r of data.coach.records || []) {
+      const i = RECORDS.findIndex(x => x.id === r.id);
+      if (i < 0) { RECORDS.push(r); added++; } else if ((r.moveCount || 0) > (RECORDS[i].moveCount || 0)) RECORDS[i] = r;
+    }
+    RECORDS.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+    const done = data.coach.done || {};
+    for (const k of ['lessons', 'problems', 'yi']) Object.assign(S.done[k], done[k] || {});
+  }
+  S.sync.last = new Date().toISOString();
+  saveRecords();
+  save();
+  fillGameSelect();
+  fillProblemSelect();
+  return added;
+}
+
+let syncing = false;
+async function syncNow(quiet) {
+  if (syncing || !S.sync.userId) return false;
+  syncing = true;
+  try {
+    const coachDone = { lessons: {}, problems: S.done.problems, yi: S.done.yi };
+    for (const [k, v] of Object.entries(S.done.lessons)) if (!/^yi\d+$/.test(k)) coachDone.lessons[k] = v;
+    const data = await syncPost(syncServer(), {
+      schema: 2, client: 'weiqi-coach', profiles: [], progress: { [S.sync.userId]: yiProgressPayload() },
+      coach: { userId: S.sync.userId, records: RECORDS, done: coachDone },
+    }, quiet ? 4000 : 8000);
+    const added = applySyncResult(data);
+    if (!quiet) toast(`同步完成：共 ${RECORDS.length} 盘对局${added ? `（新增 ${added} 盘）` : ''}`);
+    else if (added) toast(`已从家里同步 ${added} 盘对局`);
+    render();
+    return true;
+  } catch (e) {
+    if (!quiet) toast(`同步失败：${syncErrorText(e)}`);
+    return false;
+  } finally {
+    syncing = false;
+  }
+}
+
+function syncErrorText(e) {
+  if (e && e.name === 'AbortError') return '连不上学习中心（是否在家里的 Wi-Fi？Mac 上的学习中心是否已启动？）';
+  if (e instanceof TypeError) return '连不上学习中心：请确认在家里的 Wi-Fi、Mac 上的学习中心已启动，并且这台设备已安装信任家里的证书';
+  return e.message || String(e);
+}
+
+function openSync() {
+  $('syncServer').value = syncServer();
+  $('syncStatus').textContent = S.sync.userId
+    ? `当前用户：${S.sync.userName}${S.sync.last ? `，上次同步：${new Date(S.sync.last).toLocaleString('zh-CN')}` : ''}`
+    : '先点“连接”，再选择你的用户。';
+  $('syncUserRow').hidden = $('syncNewRow').hidden = true;
+  $('dlgSync').showModal();
+  if (S.sync.userId) syncConnect();
+}
+
+async function syncConnect() {
+  const server = $('syncServer').value.trim().replace(/\/+$/, '');
+  $('syncStatus').textContent = '正在连接…';
+  try {
+    const data = await syncPost(server, { schema: 2, profiles: [], progress: {} });
+    S.sync.server = server === DEFAULT_SYNC_SERVER ? '' : server;
+    const sel = $('syncUser');
+    sel.innerHTML = data.profiles.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('') + '<option value="__new">新建一个用户…</option>';
+    sel.value = S.sync.userId && data.profiles.some(p => p.id === S.sync.userId) ? S.sync.userId : (data.profiles[0] ? data.profiles[0].id : '__new');
+    $('syncUserRow').hidden = false;
+    $('syncNewRow').hidden = sel.value !== '__new';
+    $('syncStatus').textContent = `已连接学习中心，共 ${data.profiles.length} 个用户。选好用户后点“立即同步”。`;
+    save();
+  } catch (e) {
+    $('syncStatus').textContent = `连接失败：${syncErrorText(e)}`;
+  }
+}
+
+async function syncChooseAndRun() {
+  const sel = $('syncUser');
+  if ($('syncUserRow').hidden) { await syncConnect(); if ($('syncUserRow').hidden) return; }
+  if (sel.value === '__new') {
+    const name = $('syncNewName').value.trim();
+    if (!name) { $('syncStatus').textContent = '请填写新用户的名字。'; return; }
+    const id = `coach-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`, now = new Date().toISOString();
+    try {
+      await syncPost(syncServer(), { schema: 2, profiles: [{ id, name, createdAt: now, updatedAt: now }], progress: {} });
+    } catch (e) { $('syncStatus').textContent = `新建用户失败：${syncErrorText(e)}`; return; }
+    S.sync.userId = id;
+    S.sync.userName = name;
+  } else {
+    S.sync.userId = sel.value;
+    S.sync.userName = sel.options[sel.selectedIndex].textContent;
+  }
+  save();
+  $('syncStatus').textContent = '正在同步…';
+  const ok = await syncNow(false);
+  $('syncStatus').textContent = ok ? `同步完成：用户 ${S.sync.userName}，共 ${RECORDS.length} 盘对局。以后在家里打开本应用会自动同步。` : '同步没有成功，看上面的提示。';
 }
 
 // ---------------- 回看（不改变对局） ----------------
@@ -2032,6 +2175,11 @@ $('btnRvNext').addEventListener('click', () => reviewStep(1));
 $('btnRvClear').addEventListener('click', () => { S.tries = []; S.tryNote = null; render(); });
 $('btnRvBack').addEventListener('click', () => { exitReview(); render(); advance(); });
 $('btnHelp').addEventListener('click', () => $('dlgHelp').showModal());
+$('btnSync').addEventListener('click', openSync);
+$('btnSyncConnect').addEventListener('click', syncConnect);
+$('btnSyncNow').addEventListener('click', syncChooseAndRun);
+$('syncUser').addEventListener('change', e => { $('syncNewRow').hidden = e.target.value !== '__new'; });
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && S.sync.userId) syncNow(true); });
 
 function bindPref(id, key, after) {
   $(id).addEventListener('change', e => {
@@ -2152,3 +2300,4 @@ else if (S.mode === 'play') {
   else advance();
 }
 if (firstRun) $('dlgWelcome').showModal();
+else if (S.sync.userId) setTimeout(() => syncNow(true), 1500);
