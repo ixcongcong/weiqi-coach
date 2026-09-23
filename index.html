@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="围棋教练">
+  <meta name="theme-color" content="#f4ebdd">
+  <meta name="color-scheme" content="light">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="icons/icon-180.png">
+  <link rel="icon" type="image/png" href="icons/icon-192.png">
+  <link rel="stylesheet" href="app.css">
+  <title>围棋对战教练</title>
+</head>
+<body>
+<div id="app">
+  <section id="boardWrap">
+    <canvas id="board" aria-label="棋盘"></canvas>
+    <div id="viewBanner" hidden>
+      <span id="viewText"></span>
+      <button id="btnBackLive" class="small primary">回到对局</button>
+    </div>
+  </section>
+
+  <aside id="side">
+    <header>
+      <h1>围棋对战教练</h1>
+      <div id="meta"></div>
+    </header>
+
+    <div id="status"></div>
+
+    <div class="card" id="wrCard">
+      <div class="wr-labels"><span id="wrYouLabel">你</span><span id="wrAiLabel">AI</span></div>
+      <div class="wrbar"><div id="wrYou"></div></div>
+      <canvas id="graph" aria-label="胜率曲线"></canvas>
+    </div>
+
+    <div id="controls">
+      <button id="btnNew">新局</button>
+      <button id="btnUndo">悔棋</button>
+      <button id="btnPass">停一手</button>
+      <button id="btnHint" class="primary">提示</button>
+      <button id="btnOwn">形势</button>
+      <button id="btnResign">认输</button>
+    </div>
+
+    <div class="card" id="aiCard">
+      <label class="row">AI 难度
+        <select id="selLevel"></select>
+      </label>
+      <label class="row">AI 胜率控制
+        <input id="rngTarget" type="range" min="20" max="100" step="5">
+        <b id="targetText"></b>
+      </label>
+      <p class="note" id="targetNote"></p>
+      <div class="toggles">
+        <label><input type="checkbox" id="chkCoach"> 讲解每一手</label>
+        <label><input type="checkbox" id="chkCands"> 显示 AI 推荐点</label>
+        <label><input type="checkbox" id="chkConfirm"> 点两次确认落子</label>
+      </div>
+    </div>
+
+    <div id="coach"></div>
+  </aside>
+</div>
+
+<dialog id="dlgNew">
+  <form method="dialog">
+    <h2>新对局</h2>
+    <label class="row">棋盘
+      <select name="size">
+        <option value="9">9 路（推荐入门）</option>
+        <option value="13">13 路</option>
+        <option value="19">19 路（正式棋盘）</option>
+      </select>
+    </label>
+    <label class="row">我执
+      <select name="human">
+        <option value="1">黑棋（先行）</option>
+        <option value="2">白棋（后行）</option>
+      </select>
+    </label>
+    <label class="row">让子
+      <select name="handicap"></select>
+    </label>
+    <label class="row">贴目
+      <select name="komi">
+        <option value="auto">自动（让子 0.5，否则 7.5）</option>
+        <option value="7.5">7.5</option>
+        <option value="6.5">6.5</option>
+        <option value="5.5">5.5</option>
+        <option value="3.5">3.5</option>
+        <option value="0.5">0.5</option>
+      </select>
+    </label>
+    <p class="note">让子：执黑的一方先在星位摆好几个子，是水平有差距时最常用的办法。</p>
+    <menu>
+      <button value="cancel">取消</button>
+      <button value="ok" class="primary">开始</button>
+    </menu>
+  </form>
+</dialog>
+
+<dialog id="dlgMsg">
+  <form method="dialog">
+    <h2 id="msgTitle"></h2>
+    <p id="msgText"></p>
+    <menu id="msgMenu"></menu>
+  </form>
+</dialog>
+
+<div id="toast" hidden></div>
+
+<script src="engine.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
