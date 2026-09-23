@@ -1,9 +1,9 @@
 /* 离线缓存：第一次打开后，所有文件都缓存在本机，断网也能用。
  * 发布新版本时修改 VERSION：浏览器发现 sw.js 变了，就会在后台下载新文件，
  * 页面收到 controllerchange 后提示“新版本已下载好”。 */
-const VERSION = 'weiqi-coach-2.1';
+const VERSION = 'weiqi-coach-2.2';
 const FILES = [
-  './', 'index.html', 'app.css', 'app.js', 'engine.js', 'games.js', 'manifest.webmanifest',
+  './', 'index.html', 'app.css', 'app.js', 'engine.js', 'games.js', 'faq.js', 'manifest.webmanifest',
   'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png',
 ];
 

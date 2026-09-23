@@ -1,7 +1,7 @@
 'use strict';
 /* 围棋对战教练：界面、对局流程、棋谱学习、讲解。引擎在 engine.js，计算在 Web Worker 里进行。 */
 
-const APP_VERSION = '2.1';
+const APP_VERSION = '2.2';
 const G = window.Go;
 const { EMPTY, BLACK, WHITE, PASS, NONE, RESIGN } = G;
 const GAMES = window.GAMES || [];
@@ -148,6 +148,9 @@ const S = {
   ghost: NONE,
   pendingTap: NONE,
 };
+
+// 提问的状态：pick = 等待在棋盘上点一个点 / 一块棋；mark = 棋盘上要圈出来的棋子
+const Q = { open: false, pick: null, seq: 0, mark: null };
 
 // 棋谱学习的状态
 const T = {
@@ -330,10 +333,10 @@ async function aiTurn(gen, k) {
   if (gen !== S.gen) return;
   S.aiThinking = false;
   if (move === RESIGN) {
-    S.result = { text: 'AI 认输，你赢了！🎉', winner: S.game.human };
+    S.result = { text: 'AI 认输，你赢了！', winner: S.game.human };
     save();
     render();
-    showMessage('对局结束', 'AI 认输，你赢了！🎉', true);
+    showMessage('对局结束', 'AI 认输，你赢了！', true);
     return;
   }
   if (move === PASS) toast('AI 停一手');
@@ -344,6 +347,7 @@ function playMove(m, internal) {
   if (!S.board.play(m)) return false;
   S.history.push(m);
   S.hint = null;
+  Q.mark = null;
   S.pendingTap = NONE;
   save();
   if (S.board.passes >= 2) startScoring();
@@ -362,7 +366,7 @@ async function startScoring() {
   S.scoring = new G.Scoring(S.board, G.guessDead(pos, o.own), S.game.komi);
   render();
   const won = S.scoring.winner() === S.game.human;
-  showMessage('对局结束', `${scoreText()}\n\n${won ? '你赢了！🎉' : 'AI 获胜'}\n\n如果死活判断有误，可以点棋盘上的棋子切换死活。`, true);
+  showMessage('对局结束', `${scoreText()}\n\n${won ? '你赢了！' : 'AI 获胜'}\n\n如果死活判断有误，可以点棋盘上的棋子切换死活。`, true);
 }
 
 function scoreText() {
@@ -374,11 +378,11 @@ function scoreText() {
 // ---------------- 对战：讲解 ----------------
 
 function quality(delta, isBest) {
-  if (isBest) return { cls: 'best', label: '最佳 ✨' };
-  if (delta < 0.03) return { cls: 'good', label: '好棋 👍' };
-  if (delta < 0.08) return { cls: 'ok', label: '可以 🙂' };
-  if (delta < 0.15) return { cls: 'slow', label: '缓手 ⚠️' };
-  return { cls: 'bad', label: '恶手 ❌' };
+  if (isBest) return { cls: 'best', label: '最佳' };
+  if (delta < 0.03) return { cls: 'good', label: '好棋' };
+  if (delta < 0.08) return { cls: 'ok', label: '可以' };
+  if (delta < 0.15) return { cls: 'slow', label: '缓手' };
+  return { cls: 'bad', label: '恶手' };
 }
 
 async function makeComment(j) {
@@ -579,6 +583,7 @@ function studyComment(i) {
 function studyGo(idx) {
   const n = gameMoves(sg()).length;
   T.idx = clamp(idx, 0, n);
+  Q.mark = null;
   const want = new Set([T.idx - 1, T.idx, T.idx + 1].filter(i => i >= 0 && i <= n));
   const stale = T.aprom.some((p, i) => p && !T.analyses[i] && !want.has(i));
   if (stale) {
@@ -627,7 +632,7 @@ function studyTap(p) {
   if (p === actual) {
     T.hit++;
     T.lastGuess = { ok: true, at: T.idx + 1 };
-    toast('猜中了！✨');
+    toast('猜中了！');
   } else {
     T.lastGuess = { ok: false, at: T.idx + 1, p, guess: b.name(p), actual: b.name(actual) };
     toast(`实战下在 ${b.name(actual)}`);
@@ -832,6 +837,12 @@ function drawBoard() {
     }
   }
 
+  if (Q.mark) {
+    ctx.strokeStyle = '#1565c0';
+    ctx.lineWidth = Math.max(2, r * 0.2);
+    for (const p of Q.mark) { ctx.beginPath(); ctx.arc(X(p), Y(p), r * 1.05, 0, Math.PI * 2); ctx.stroke(); }
+  }
+
   if (v.study && T.lastGuess && !T.lastGuess.ok && T.lastGuess.at === T.idx) {
     const p = T.lastGuess.p, d = r * 0.45;
     ctx.strokeStyle = '#1565c0';
@@ -852,6 +863,7 @@ function toPoint(e) {
 }
 
 function onBoardTap(p) {
+  if (Q.pick && p !== NONE) { askPicked(p); return; }
   if (S.mode === 'study') { studyTap(p); return; }
   if (p === NONE || S.view !== null) return;
   if (S.scoring) {
@@ -971,8 +983,8 @@ function studyCoachHtml() {
   const info = `<div class="cm game"><div class="h"><b>${esc(g.title)}</b>
     <span class="wr">${lesson ? '套路讲解' : `${g.year} 年 · ${esc(g.result)}`}</span></div>
     ${lesson ? '' : `<div>黑：${esc(g.black)}　白：${esc(g.white)}</div>`}
-    ${i === 0 ? `<p>${esc(g.intro)}</p><p class="note">点 ▶ 一步步看，每一手都有讲解；打开“猜棋”先自己想下一手再揭晓，是提高棋力最有效的练习。</p>` : ''}
-    ${lesson && (i === 0 || i === n) ? `<div class="key">💡 ${esc(g.use)}</div>` : ''}
+    ${i === 0 ? `<p>${esc(g.intro)}</p><p class="note">点“下一手”一步步看，每一手都有讲解；打开“猜棋”先自己想下一手再揭晓，是提高棋力最有效的练习。</p>` : ''}
+    ${lesson && (i === 0 || i === n) ? `<div class="key">${esc(g.use)}</div>` : ''}
     <div class="note">${lesson ? '每一步：' : '重点手：'}</div>${keysHtml}</div>`;
   if (i === 0) return info;
   const b = studyBoardAt(i - 1), m = mv[i - 1], c = b.toPlay;
@@ -981,16 +993,16 @@ function studyCoachHtml() {
   const who = lesson ? colorName(c) : `${colorName(c)}（${esc(c === BLACK ? g.black : g.white)}）`;
   let h = `<div class="cm${note ? ' best' : ''}"><div class="h"><b>第 ${i} 手</b> ${who}下 ${esc(b.name(m))}
     ${cm ? `<span class="wr">黑胜率约 ${pct(cm.blackWr)}</span>` : ''}</div>`;
-  if (note) h += `<div class="key">📖 ${esc(note)}</div>`;
+  if (note) h += `<div class="key"><b>讲解：</b>${esc(note)}</div>`;
   if (T.lastGuess && T.lastGuess.at === i) {
     h += T.lastGuess.ok
-      ? '<p>🎯 你猜中了这一手！</p>'
-      : `<p>你猜的是 ${esc(T.lastGuess.guess)}（棋盘上的蓝色 ×），实战下在 ${esc(T.lastGuess.actual)}。对比一下两手棋的区别。</p>`;
+      ? '<p>你猜中了这一手！</p>'
+      : `<p>你猜的是 ${esc(T.lastGuess.guess)}（棋盘上的蓝色叉号），实战下在 ${esc(T.lastGuess.actual)}。对比一下两手棋的区别。</p>`;
   }
   h += `<div class="note" style="margin-top:6px">AI 讲解：</div>${reasonsHtml(cm && cm.reasons)}`;
   if (cm && cm.top) {
     h += cm.top.same
-      ? '<p class="note">✨ 这手棋与本机 AI 引擎的首选一致。</p>'
+      ? '<p class="note">这手棋与本机 AI 引擎的首选一致。</p>'
       : `<p class="note">本机 AI 引擎的首选是 ${esc(cm.top.name)}。引擎棋力远不如这些高手，这里只作对照：想一想高手为什么没有下那里。</p>`;
   }
   if (i === n && !lesson) h += `<p><b>终局：${esc(g.result)}</b></p>`;
@@ -1018,7 +1030,7 @@ function render() {
     $('btnFirst').disabled = $('btnPrev').disabled = T.idx === 0;
     $('btnNext').disabled = $('btnLast').disabled = T.idx >= n;
     $('btnAuto').classList.toggle('on', !!T.auto);
-    $('btnAuto').textContent = T.auto ? '暂停' : '自动';
+    $('btnAuto').textContent = T.auto ? '暂停' : '自动播放';
     $('btnGuess').classList.toggle('on', T.guess);
     $('coach').innerHTML = studyCoachHtml();
     $('viewBanner').hidden = true;
@@ -1041,6 +1053,209 @@ function render() {
   }
   drawBoard();
 }
+
+// ---------------- 提问 ----------------
+
+/** 当前局面及其分析：对战里以“你”为视角，棋谱里以轮到下棋的一方为视角。 */
+function askContext() {
+  if (S.mode === 'study') {
+    const b = studyBoardAt(T.idx);
+    return { b, getA: () => getStudyAnalysis(T.idx), me: b.toPlay, meName: colorName(b.toPlay), opName: colorName(3 - b.toPlay), komi: sg().komi || 0, budget: STUDY_BUDGET };
+  }
+  const k = S.history.length;
+  return { b: S.board.copy(), getA: () => getAnalysis(k), me: S.game.human, meName: '你', opName: 'AI', komi: S.game.komi, budget: BUDGET[S.game.size] };
+}
+
+function askShow(q, html) {
+  $('askAnswer').innerHTML = `<div class="q">问：${esc(q)}</div>${html}`;
+}
+
+function openAsk(open) {
+  Q.open = open;
+  Q.pick = null;
+  Q.mark = null;
+  $('askPanel').hidden = !open;
+  $('btnAsk').classList.toggle('on', open);
+  $('btnAsk2').classList.toggle('on', open);
+  if (open) $('askAnswer').innerHTML = '';
+  syncAskChips();
+  drawBoard();
+}
+
+function syncAskChips() {
+  for (const el of document.querySelectorAll('[data-ask]')) el.classList.toggle('on', Q.pick === el.dataset.ask);
+}
+
+/** 执行一个提问；返回 false 表示需要先在棋盘上点选。 */
+async function ask(kind, label) {
+  const seq = ++Q.seq, ctx0 = askContext(), b = ctx0.b;
+  const alive = () => seq === Q.seq;
+  if (kind === 'point' || kind === 'group') {
+    if (S.mode === 'play' && kind === 'point' && !canHumanMove()) { askShow(label, '<p>等轮到你下的时候再问这个问题。</p>'); return; }
+    Q.pick = kind;
+    syncAskChips();
+    askShow(label, `<p>请在棋盘上点${kind === 'point' ? '一个空点' : '一块棋的任意一个棋子'}。</p>`);
+    return;
+  }
+  askShow(label, '<p>正在分析…</p>');
+  const a = await ctx0.getA();
+  if (!alive()) return;
+  if (!a) { askShow(label, '<p>分析被打断了，请再问一次。</p>'); return; }
+  const meWr = a.toPlay === ctx0.me ? a.wr : 1 - a.wr;
+  if (kind === 'lead') {
+    const sc = a.score;
+    const lead = Math.abs(sc) < 1 ? '双方非常接近' : `${sc > 0 ? '黑' : '白'}领先约 ${Math.abs(sc).toFixed(1)} 子`;
+    const feel = meWr > 0.7 ? '形势明显有利，稳健地下，不要冒险。' : meWr > 0.55 ? '稍微领先，注意补强自己的弱棋。'
+      : meWr > 0.45 ? '难解难分，下一两手很关键。' : meWr > 0.3 ? '稍微落后，需要找机会主动出击。' : '形势落后较多，要在对方的薄弱处寻找战斗机会。';
+    askShow(label, `<p>形势判断：${lead}（已计入贴目 ${ctx0.komi}）。</p><p>${esc(ctx0.meName)}的胜率约 ${pct(meWr)}：${feel}</p><p class="note">想看双方地盘的分布，可以打开“形势”。</p>`);
+    return;
+  }
+  if (kind === 'best') {
+    const top = a.cands.slice(0, 3);
+    if (!top.length) { askShow(label, '<p>已经没有可下的地方了，可以停一手。</p>'); return; }
+    const after = b.copy();
+    after.play(top[0].move);
+    const o = await pool.ownership(after, ctx0.budget.own, ctx0.komi);
+    if (!alive() || !o) return;
+    Q.mark = top.map(c => c.move).filter(m => m >= 0);
+    drawBoard();
+    const reasons = G.explain(b, top[0].move, b.toPlay, a.own, o.own, colorName(b.toPlay), colorName(3 - b.toPlay));
+    askShow(label, `<p>推荐 <b>${esc(b.name(top[0].move))}</b>（下这手之后${colorName(b.toPlay)}的胜率约 ${pct(top[0].wr)}）：</p>${reasonsHtml(reasons)}
+      ${top.length > 1 ? `<p class="note">其他候选：${top.slice(1).map(c => `${esc(b.name(c.move))}（${pct(c.wr)}）`).join('，')}。棋盘上用蓝圈标出了这几个点。</p>` : ''}`);
+    return;
+  }
+  if (kind === 'weak') {
+    const sgn = ctx0.me === BLACK ? 1 : -1, seen = new Set();
+    let worst = null;
+    for (let p = 0; p < b.size; p++) {
+      if (b.b[p] !== ctx0.me || seen.has(p)) continue;
+      const g = b.group(p);
+      g.stones.forEach(q => seen.add(q));
+      const s = g.stones.reduce((t, q) => t + a.own[q] * sgn, 0) / g.stones.length;
+      // 越危险、越大的棋越值得关心；已经基本死掉的小棋子不算
+      const score = s - Math.min(g.stones.length, 8) * 0.02;
+      if (s > -0.6 && (!worst || score < worst.score)) worst = { g, s, score };
+    }
+    if (!worst || worst.s > 0.6) { askShow(label, `<p>${esc(ctx0.meName)}的棋目前都比较安全，可以放心去抢大场或攻击对方。</p>`); return; }
+    Q.mark = worst.g.stones;
+    drawBoard();
+    askShow(label, `<p>${esc(ctx0.meName)}在 <b>${esc(b.name(worst.g.stones[0]))}</b> 一带的 ${worst.g.stones.length} 个子最危险（已用蓝圈标出），${groupState(worst.s, worst.g.libs)}</p>
+      <p>${groupAdvice(true, worst.s)}</p>`);
+  }
+}
+
+function groupState(s, libs) {
+  const life = s > 0.6 ? '基本是活棋' : s > 0.2 ? '比较安全' : s > -0.2 ? '死活还不确定，处在危险中' : '已经很难活了';
+  return `${life}，还有 ${libs} 口气${libs === 1 ? '——正被叫吃！' : libs === 2 ? '，气很紧' : ''}。`;
+}
+
+function groupAdvice(mine, s) {
+  if (mine) {
+    if (s > 0.6) return '这块棋不用急着补，可以去下别的大地方。';
+    if (s > -0.2) return '建议：扩大眼位、向中央出头，或者和附近自己的棋连起来；不要让对方把它封在里面。';
+    return '这块棋已经很难救了，可以考虑“弃子”，利用它在外面得到一些好处。（逢危须弃）';
+  }
+  if (s > 0.6) return '这块棋已经活了，不要浪费手数去攻击它。';
+  if (s > -0.2) return '这是攻击的好目标：封锁它的出路、破坏它的眼位，在攻击中顺便围地。';
+  return '这块棋基本被吃住了，不必再花手数，除非对方还有明显的做活手段。';
+}
+
+async function askPicked(p) {
+  const kind = Q.pick, seq = ++Q.seq;
+  Q.pick = null;
+  syncAskChips();
+  const ctx0 = askContext(), b = ctx0.b;
+  const alive = () => seq === Q.seq;
+  if (kind === 'group') {
+    const c = b.b[p];
+    if (c !== BLACK && c !== WHITE) { askShow('这块棋活吗？', '<p>这里没有棋子。请点一块棋的任意一个棋子。</p>'); Q.pick = 'group'; syncAskChips(); return; }
+    const label = `${b.name(p)} 这块棋活吗？`;
+    askShow(label, '<p>正在分析…</p>');
+    const a = await ctx0.getA();
+    if (!alive() || !a) return;
+    const g = b.group(p), sgn = c === BLACK ? 1 : -1;
+    const s = g.stones.reduce((t, q) => t + a.own[q] * sgn, 0) / g.stones.length;
+    Q.mark = g.stones;
+    drawBoard();
+    const whose = S.mode === 'play' ? (c === S.game.human ? '你' : 'AI') : colorName(c);
+    const mine = S.mode === 'play' ? c === S.game.human : c === b.toPlay;
+    askShow(label, `<p>这块${colorName(c)}棋共 ${g.stones.length} 个子（已用蓝圈标出），是${esc(whose)}的棋：${groupState(s, g.libs)}</p><p>${groupAdvice(mine, s)}</p>
+      <p class="note">判断依据：从当前局面模拟几百盘，这些棋子最后留在棋盘上的比例。</p>`);
+    return;
+  }
+  // point：下在这里怎么样
+  const label = `下在 ${b.name(p)} 怎么样？`;
+  const c = b.toPlay;
+  if (b.b[p] !== EMPTY) { askShow(label, '<p>这里已经有棋子了。请点一个空点。</p>'); Q.pick = 'point'; syncAskChips(); return; }
+  if (!b.isLegal(p, c)) {
+    askShow(label, `<p>${p === b.ko ? '不能下：这是刚被提的劫，需要先在别处下一手（找劫材）才能提回。' : '不能下：这是禁着点——下进去自己没有气，也提不掉对方的子。'}</p>`);
+    return;
+  }
+  askShow(label, '<p>正在试下这一手，大约需要几秒…</p>');
+  const a = await ctx0.getA();
+  if (!alive() || !a) return;
+  const after = b.copy();
+  after.play(p);
+  const B = await pool.analyze(after, ctx0.budget, ctx0.komi);
+  if (!alive()) return;
+  if (!B) { askShow(label, '<p>分析被打断了，请再问一次。</p>'); return; }
+  const top = a.cands[0];
+  const wrMove = 1 - B.wr, wrBest = top ? Math.max(top.wr, wrMove) : wrMove;
+  const isBest = top && top.move === p;
+  const q = quality(isBest ? 0 : wrBest - wrMove, isBest);
+  Q.mark = [p];
+  drawBoard();
+  const reasons = G.explain(b, p, c, a.own, B.own, colorName(c), colorName(3 - c));
+  askShow(label, `<p>评价：<span class="tag ${q.cls}">${q.label}</span>　下在这里之后${colorName(c)}的胜率约 ${pct(wrMove)}${isBest ? '' : `（最好的 ${esc(b.name(top.move))} 约 ${pct(top.wr)}）`}。</p>${reasonsHtml(reasons)}
+    <p class="note">这只是试下，棋盘没有变化。</p>`);
+}
+
+/** 文字提问：先识别局面类问题，否则在知识库里按关键词找答案。 */
+function askText(text) {
+  const t = text.trim();
+  if (!t) return;
+  $('askInput').value = '';
+  const has = (...ws) => ws.some(w => t.includes(w));
+  if (has('谁领先', '形势', '谁赢', '领先', '胜率多少', '优势')) return ask('lead', t);
+  if (has('下哪', '怎么下', '下一手', '推荐', '走哪')) return ask('best', t);
+  if (has('危险', '最弱', '弱棋', '要补')) return ask('weak', t);
+  if (has('这块', '这片', '活不活', '死了吗', '能活')) return ask('group', t);
+  if (has('这里下', '下这里', '这一手', '这手怎么样')) return ask('point', t);
+  const faq = window.FAQ || [];
+  const lower = t.toLowerCase();
+  // 单个字的关键词（如“气”“眼”“劫”）只在问的就是这个词时才算，避免“天气”之类误配
+  const hit = k => {
+    k = k.toLowerCase();
+    if (!lower.includes(k)) return false;
+    if (k.length > 1) return true;
+    const core = lower.replace(/[？?。！!，,\s]|什么是|是什么|什么叫|怎么|吗|呢|的|请问/g, '');
+    return core === k || core.length <= 2;
+  };
+  const scored = faq.map(f => ({ f, s: f.keys.reduce((n, k) => n + (hit(k) ? k.length * k.length : 0), 0) }))
+    .filter(x => x.s > 0).sort((x, y) => y.s - x.s);
+  if (!scored.length) {
+    askShow(t, `<p>抱歉，这个问题我答不上来。我内置的是一个下棋引擎和一本围棋小词典，不能像聊天机器人那样理解任意问题。</p>
+      <p>你可以问：关于当前局面的问题（点上面的按钮），或者围棋知识，例如：${faq.slice(0, 8).map(f => esc(f.q)).join('、')}……</p>`);
+    return;
+  }
+  const best = scored[0].f, more = scored.slice(1, 3).filter(x => x.s >= scored[0].s / 2);
+  askShow(t, `<p><b>${esc(best.q)}</b></p><p>${esc(best.a)}</p>${more.length ? `<p class="note">相关问题：${more.map(x => `<a href="#" data-faq="${faq.indexOf(x.f)}">${esc(x.f.q)}</a>`).join('、')}</p>` : ''}`);
+}
+
+$('btnAsk').addEventListener('click', () => openAsk(!Q.open));
+$('btnAsk2').addEventListener('click', () => openAsk(!Q.open));
+$('btnAskClose').addEventListener('click', () => openAsk(false));
+$('askPanel').addEventListener('click', e => {
+  const b = e.target.closest('[data-ask]');
+  if (b) { e.preventDefault(); ask(b.dataset.ask, b.textContent); return; }
+  const f = e.target.closest('[data-faq]');
+  if (f) {
+    e.preventDefault();
+    const item = window.FAQ[+f.dataset.faq];
+    askShow(item.q, `<p>${esc(item.a)}</p>`);
+  }
+});
+$('askForm').addEventListener('submit', e => { e.preventDefault(); askText($('askInput').value); });
 
 // ---------------- 对话框与提示 ----------------
 

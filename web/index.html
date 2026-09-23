@@ -24,7 +24,7 @@
       <button id="tabStudy" role="tab">棋谱</button>
     </div>
     <b id="wrText"></b>
-    <button id="btnHelp" class="small" aria-label="使用说明">？</button>
+    <button id="btnHelp" class="small" >说明</button>
   </header>
 
   <section id="boardWrap">
@@ -45,23 +45,42 @@
       <button id="btnPass">停一手</button>
       <button id="btnHint" class="primary">提示</button>
       <button id="btnOwn">形势</button>
+      <button id="btnAsk" class="ask-btn">提问</button>
       <button id="btnResign" class="wide-only">认输</button>
       <label class="chip wide-only"><input type="checkbox" id="chkCoach">讲解</label>
       <label class="chip wide-only"><input type="checkbox" id="chkCands">推荐点</label>
       <label class="chip wide-only"><input type="checkbox" id="chkConfirm">确认落子</label>
-      <button id="btnMore" class="narrow-only" aria-label="更多">⋯</button>
+      <button id="btnMore" class="narrow-only">更多</button>
     </div>
 
     <!-- 棋谱工具栏 -->
     <div id="studyBar" class="bar" hidden>
       <select id="selGame"></select>
-      <button id="btnFirst" aria-label="第一手">⏮</button>
-      <button id="btnPrev" aria-label="上一手">◀</button>
-      <button id="btnNext" class="primary" aria-label="下一手">▶</button>
-      <button id="btnLast" aria-label="最后一手">⏭</button>
-      <button id="btnAuto">自动</button>
+      <button id="btnFirst">第一手</button>
+      <button id="btnPrev">上一手</button>
+      <button id="btnNext" class="primary">下一手</button>
+      <button id="btnLast">最后一手</button>
+      <button id="btnAuto">自动播放</button>
       <button id="btnGuess">猜棋</button>
+      <button id="btnAsk2" class="ask-btn">提问</button>
       <input id="rngMove" type="range" min="0" value="0" aria-label="跳到第几手">
+    </div>
+
+    <div id="askPanel" class="cm ask" hidden>
+      <div class="h"><b>提问</b><span class="wr">点问题，或直接输入</span>
+        <button id="btnAskClose" class="small">关闭</button></div>
+      <div class="ask-chips">
+        <button data-ask="lead">现在谁领先？</button>
+        <button data-ask="best">下一手下哪里好？</button>
+        <button data-ask="point">这里下怎么样？</button>
+        <button data-ask="group">这块棋活吗？</button>
+        <button data-ask="weak">哪块棋最危险？</button>
+      </div>
+      <form id="askForm" class="ask-form">
+        <input id="askInput" type="search" enterkeyhint="send" placeholder="例如：什么是打劫？怎么做活？" autocomplete="off">
+        <button class="primary small">问</button>
+      </form>
+      <div id="askAnswer"></div>
     </div>
 
     <div id="coach"></div>
@@ -135,7 +154,7 @@
     <div class="help">
       <h3>对战</h3>
       <ul>
-        <li><b>落子</b>：手指按住棋盘会出现半透明的预览子和蓝色十字线，松开即落子。怕点错可以勾选“确认落子”（手机在“⋯”里），点两次才落子。</li>
+        <li><b>落子</b>：手指按住棋盘会出现半透明的预览子和蓝色十字线，松开即落子。怕点错可以勾选“确认落子”（手机在“更多”里），点两次才落子。</li>
         <li><b>讲解</b>：每下一手，下方会出现点评——这手是 最佳 / 好棋 / 可以 / 缓手 / 恶手，原因是什么；下得不好时还会告诉你“更好的是哪里、为什么”。点任意一条点评可以回到当时的局面复盘。</li>
         <li><b>提示</b>：告诉你推荐下在哪里、为什么，棋盘上的数字是走那里之后的胜率。</li>
         <li><b>形势</b>：在棋盘上显示双方大致的地盘（黑方块 / 白方块），并估算谁领先几子。</li>
@@ -147,8 +166,14 @@
       <ul>
         <li><b>套路讲解</b>：双叫吃、征子、倒扑、打劫、布局次序等入门必学的手段，每一步都有说明，最后告诉你“实战中怎么用”。</li>
         <li><b>经典名局</b>：耳赤之局、吴清源“三三·星·天元”、AlphaGo 第 37 手、李世石“神之一手”、当湖十局。重点手有专门的讲解，点“第 N 手”按钮可以直接跳过去。</li>
-        <li><b>▶ / ◀</b>：一步步前进后退；拖动滑块可以快速跳转；电脑上也可以用键盘左右方向键。<b>自动</b>：每 3.5 秒走一步。</li>
-        <li><b>猜棋</b>：打开后，先在棋盘上点你认为的下一手，再揭晓答案。猜错的位置会用蓝色 × 标出。这是提高棋力最有效的练习方法。</li>
+        <li><b>下一手 / 上一手</b>：一步步前进后退；拖动滑块可以快速跳转；电脑上也可以用键盘左右方向键。<b>自动播放</b>：每 3.5 秒走一步。</li>
+        <li><b>猜棋</b>：打开后，先在棋盘上点你认为的下一手，再揭晓答案。猜错的位置会用蓝色叉号标出。这是提高棋力最有效的练习方法。</li>
+      </ul>
+      <h3>提问</h3>
+      <ul>
+        <li>点“提问”打开提问区。可以直接点问题按钮：<b>现在谁领先？</b> <b>下一手下哪里好？</b> <b>这里下怎么样？</b>（再点棋盘上一个空点，AI 试下后告诉你好坏和原因，棋盘不会变）<b>这块棋活吗？</b>（再点一块棋）<b>哪块棋最危险？</b></li>
+        <li>也可以输入文字提问，例如“什么是打劫”“怎么做活”“收官的顺序”。内置了 28 条常见的围棋知识。</li>
+        <li>引擎是离线的，不能像聊天机器人那样理解任意问题；答不上来时会告诉你可以问什么。</li>
       </ul>
       <h3>关于 AI</h3>
       <p>AI 是内置在程序里的围棋引擎（蒙特卡洛树搜索），完全离线运行，不联网，也不调用大模型。它大约是业余棋手的水平，讲解是根据胜率和地盘变化自动生成的，复杂的局面仅供参考。</p>
@@ -171,6 +196,7 @@
 
 <script src="engine.js"></script>
 <script src="games.js"></script>
+<script src="faq.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
