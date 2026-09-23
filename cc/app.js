@@ -701,7 +701,13 @@ function stepGo(d) {
 }
 
 function fillLessons() {
-  $('selLesson').innerHTML = DATA.lessons.map((l, i) => `<option value="${i}">${S.done.lessons[l.id] ? '✓ ' : ''}${esc(l.title)}</option>`).join('');
+  // 按阶段分组（第 1 阶段……、套路 · 杀法……）
+  let html = '', stage = null;
+  DATA.lessons.forEach((l, i) => {
+    if (l.stage !== stage) { if (stage !== null) html += '</optgroup>'; stage = l.stage; html += `<optgroup label="${esc(stage || '')}">`; }
+    html += `<option value="${i}">${S.done.lessons[l.id] ? '✓ ' : ''}${esc(l.title)}</option>`;
+  });
+  $('selLesson').innerHTML = html + (stage !== null ? '</optgroup>' : '');
   $('selLesson').value = String(S.learn.li);
 }
 

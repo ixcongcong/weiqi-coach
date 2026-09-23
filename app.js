@@ -2,7 +2,7 @@
 /* 围棋对战教练：对战、学习（课程与名局）、练习、提问。
  * 引擎在 engine.js；蒙特卡洛计算在 Web Worker 里进行，局部死活计算在主线程（很快）。 */
 
-const APP_VERSION = '3.3';
+const APP_VERSION = '3.4';
 const G = window.Go;
 const { EMPTY, BLACK, WHITE, PASS, NONE, RESIGN } = G;
 const GAMES = window.GAMES || [];
@@ -2059,7 +2059,8 @@ function humanLead() {
   if (!la || !la.a.nn) return null;
   return (pvp() ? BLACK : S.game.human) === BLACK ? la.a.score : -la.a.score;
 }
-const leadNote = v => (v === null ? '' : Math.abs(v) < 0.5 ? ' · 均势' : ` · ${v > 0 ? '领先' : '落后'}${Math.round(Math.abs(v) * 2) / 2}目`);
+// 开局前几手注明“含贴目”：黑方开局就显示落后，是因为终局要贴目给白方
+const leadNote = v => (v === null ? '' : (Math.abs(v) < 0.5 ? ' · 均势' : ` · ${v > 0 ? '领先' : '落后'}${Math.round(Math.abs(v) * 2) / 2}目`) + (S.history.length < 6 && S.game.komi ? `（含贴目 ${S.game.komi}）` : ''));
 
 function humanWr() {
   const la = latestAnalysis(S.analyses, S.history.length);
