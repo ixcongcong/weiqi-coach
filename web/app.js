@@ -2,7 +2,7 @@
 /* 围棋对战教练：对战、学习（课程与名局）、练习、提问。
  * 引擎在 engine.js；蒙特卡洛计算在 Web Worker 里进行，局部死活计算在主线程（很快）。 */
 
-const APP_VERSION = '3.6';
+const APP_VERSION = '3.7';
 const G = window.Go;
 const { EMPTY, BLACK, WHITE, PASS, NONE, RESIGN } = G;
 const GAMES = window.GAMES || [];
@@ -37,6 +37,7 @@ function recommendLevel() {
 }
 
 const ENGINES = {
+  b20: '神经网络（最强，20 层；适合高性能手机，第一次下载约 95 MB）',
   b10: '神经网络（强，推荐）',
   b6: '神经网络（快，适合旧设备）',
   mcts: '传统引擎（不用神经网络）',
@@ -117,14 +118,16 @@ class NNEngine {
     this.worker = w;
     w.onmessage = e => {
       const m = e.data;
-      if (m.type === 'ready') { this.ready = true; this.info = m; this.changed(); return; }
+      if (m.type === 'ready') { this.ready = true; this.info = m; this.progress = null; this.changed(); return; }
+      if (m.type === 'progress') { this.progress = m.pct; if (typeof showEngineStatus === 'function') showEngineStatus(); return; }
       if (m.type === 'error') { this.fail(m.msg); return; }
       if (m.err) this.fail(m.err);
       const res = this.pending.get(m.id);
       if (res) { this.pending.delete(m.id); res(m.res); }
     };
     w.onerror = e => { e.preventDefault(); this.fail(e.message || '神经网络加载失败'); };
-    w.postMessage({ type: 'init', model });
+    // 20 层大网络在支持 WebGPU 的设备上用显卡计算
+    w.postMessage({ type: 'init', model, gpu: model === 'b20' });
   }
 
   stop() {
@@ -191,9 +194,10 @@ class NNEngine {
   status0() {
     if (this.model === 'mcts') return '现在用的是传统引擎。';
     if (this.failed) return `神经网络不可用（${this.failed}），暂时用传统引擎。`;
-    if (!this.ready) return '正在加载神经网络…（第一次需要下载约 30 MB，之后离线可用）';
-    const i = this.info;
-    return `神经网络已就绪：${this.model === 'b10' ? '10 层 128 通道' : '6 层 96 通道'}的 KataGo 网络，单次计算约 ${i.evalMs} 毫秒${i.threads > 1 ? `，${i.threads} 线程` : ''}。`;
+    if (!this.ready) return `正在加载神经网络…${this.progress !== null && this.progress !== undefined ? `已下载 ${this.progress}%` : ''}（第一次需要下载，之后离线可用）`;
+    const i = this.info, name = { b20: '20 层 256 通道', b10: '10 层 128 通道', b6: '6 层 96 通道' }[this.model];
+    const tip = this.model !== 'b20' && self.navigator && navigator.gpu && (navigator.hardwareConcurrency || 0) >= 8 ? '这台设备支持显卡加速，可以选“最强”网络。' : '';
+    return `神经网络已就绪：${name}的 KataGo 网络，单次计算约 ${i.evalMs} 毫秒，${i.backend === 'webgpu' ? '用显卡（WebGPU）计算' : i.threads > 1 ? `${i.threads} 线程` : '单线程'}。${tip}`;
   }
 }
 
@@ -384,7 +388,8 @@ class Pool {
     if (home.ready) { const r = await home.search(board, budget.home || 200, komi); if (r) return r; }
     await nn.whenReady(20000);
     if (nn.ready) {
-      const r = await nn.search(board, budget.visits, budget.ms, komi);
+      // 用显卡时同样的时间能算更多，搜索量放大 3 倍（仍受时间限制）
+      const r = await nn.search(board, nn.info && nn.info.backend === 'webgpu' ? budget.visits * 3 : budget.visits, budget.ms, komi);
       if (r || nn.ready) return r;
     }
     const [s, o] = await Promise.all([
