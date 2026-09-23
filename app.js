@@ -2,7 +2,7 @@
 /* 围棋对战教练：对战、学习（课程与名局）、练习、提问。
  * 引擎在 engine.js；蒙特卡洛计算在 Web Worker 里进行，局部死活计算在主线程（很快）。 */
 
-const APP_VERSION = '3.1';
+const APP_VERSION = '3.2';
 const G = window.Go;
 const { EMPTY, BLACK, WHITE, PASS, NONE, RESIGN } = G;
 const GAMES = window.GAMES || [];
@@ -2230,6 +2230,8 @@ function practiceCoachHtml() {
 function render() {
   const mode = S.mode;
   $('btnUser').textContent = curUser().name;
+  // “提示”只在正显示提示时高亮
+  $('btnHint').classList.toggle('on', !!S.hint);
   $('tabPlay').classList.toggle('on', mode === 'play');
   $('tabStudy').classList.toggle('on', mode === 'study' && T.cat === 'learn');
   $('tabGames').classList.toggle('on', mode === 'study' && T.cat === 'games');
@@ -2330,14 +2332,32 @@ function askContext() {
 function askShow(q, html, src, isPending) {
   const pending = isPending === undefined ? /正在/.test(html) : isPending;
   const last = Q.log[Q.log.length - 1];
-  if (last && last.q === q && last.pending) Object.assign(last, { html, src, pending });
-  else Q.log.push({ q, html, src, pending });
+  // 记下这次回答在棋盘上标的点，之后可以再看
+  const marks = { mark: Q.mark ? Q.mark.slice() : null, area: Q.area ? Q.area.slice() : null, key: askPosKey() };
+  if (last && last.q === q && last.pending) Object.assign(last, { html, src, pending }, (marks.mark || marks.area) ? marks : {});
+  else Q.log.push({ q, html, src, pending, ...marks });
   if (Q.log.length > 30) Q.log.shift();
   const box = $('askAnswer');
   // 只显示最新的一问一答（之前的问答仍留在 Q.log 里，给大模型当上下文）
-  box.innerHTML = Q.log.slice(-1).map(m => `<div class="chat-q">${esc(m.q)}</div><div class="chat-a">${m.html}${m.src ? `<div class="note src">${esc(m.src)}</div>` : ''}</div>`).join('');
+  box.innerHTML = Q.log.slice(-1).map(m => `<div class="chat-q">${esc(m.q)}</div><div class="chat-a">${m.html}${(m.mark && m.mark.length) || (m.area && m.area.length) ? '<p><button type="button" class="small" data-askshow>在棋盘上再看一次</button></p>' : ''}${m.src ? `<div class="note src">${esc(m.src)}</div>` : ''}</div>`).join('');
   box.scrollTop = 0;
 }
+
+/** 当前局面的标识：局面变了，旧答案标的点就不对了 */
+function askPosKey() {
+  return S.mode === 'play' ? `p${S.history.length}:${S.view}` : S.mode === 'study' ? `s${T.gi}:${T.idx}` : `x${S.mode}`;
+}
+
+$('askAnswer').addEventListener('click', e => {
+  if (!e.target.closest('[data-askshow]')) return;
+  const m = Q.log[Q.log.length - 1];
+  if (!m) return;
+  if (m.key !== askPosKey()) { toast('局面变了，按现在的局面重新回答'); askText(m.q); return; }
+  Q.mark = m.mark ? m.mark.slice() : null;
+  Q.area = m.area ? m.area.slice() : null;
+  drawBoard();
+  $('board').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+});
 
 function openAsk(open) {
   Q.open = open;
@@ -2676,7 +2696,11 @@ $('tabPractice').addEventListener('click', () => setMode('practice'));
 $('btnNew').addEventListener('click', openNewGame);
 $('btnUndo').addEventListener('click', undo);
 $('btnPass').addEventListener('click', humanPass);
-$('btnHint').addEventListener('click', showHint);
+$('btnHint').addEventListener('click', () => {
+  // 再点一次收起提示
+  if (S.hint && !S.hint.loading) { S.hint = null; Q.mark = null; render(); return; }
+  showHint();
+});
 $('btnResign').addEventListener('click', resign);
 $('btnOwn').addEventListener('click', () => { S.prefs.own = !S.prefs.own; save(); render(); });
 $('btnReview').addEventListener('click', () => enterReview());

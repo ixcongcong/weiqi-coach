@@ -2,7 +2,7 @@
  * 发布新版本时修改 VERSION：浏览器发现 sw.js 变了，就会在后台下载新文件，
  * 页面收到 controllerchange 后提示“新版本已下载好”。
  * 神经网络和 onnxruntime 很大（约 30 MB），放在单独的 ASSETS 缓存里，文件名不变就不重新下载。 */
-const VERSION = 'weiqi-coach-3.1';
+const VERSION = 'weiqi-coach-3.2';
 const ASSETS = 'weiqi-assets-1';
 const FILES = [
   './', 'index.html', 'app.css', 'app.js', 'engine.js', 'nn.js', 'nnworker.js', 'games.js', 'problems.js', 'faq.js', 'assistant.js', 'manifest.webmanifest',
