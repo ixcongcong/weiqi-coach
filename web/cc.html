@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="zh-CN" data-game="xiangqi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="弈">
+  <meta name="theme-color" content="#f4ebdd">
+  <script>
+    try { var t = localStorage.getItem('weiqi-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'); document.documentElement.dataset.theme = t; } catch (e) {}
+    document.documentElement.dataset.game = /[?&]g=chess/.test(location.search) ? 'chess' : 'xiangqi';
+  </script>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="icons/icon-180.png">
+  <link rel="icon" type="image/png" href="icons/icon-192.png">
+  <link rel="stylesheet" href="app.css">
+  <link rel="stylesheet" href="cc/cc.css">
+  <title>弈 · 象棋</title>
+</head>
+<body>
+<div id="app">
+  <header id="top">
+    <h1 id="title">象棋</h1>
+    <div class="tabs" role="tablist">
+      <button id="tabPlay" role="tab">对战</button>
+      <button id="tabLearn" role="tab">学习</button>
+      <button id="tabGames" role="tab">棋谱</button>
+      <button id="tabPractice" role="tab">练习</button>
+    </div>
+    <button id="btnTheme" class="small" title="白天 / 夜晚" aria-label="切换白天 / 夜晚"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 5a7 7 0 0 0 0 14z" fill="currentColor" stroke="none"/><path d="M12 5a7 7 0 0 1 0 14a5 5 0 0 0 0-14z" fill="currentColor" stroke="none" opacity=".35"/><circle cx="12" cy="12" r="7"/><path d="M12 1.5v1.5M12 21v1.5M4.6 4.6l1 1M18.4 18.4l1 1M1.5 12H3M21 12h1.5M4.6 19.4l1-1M18.4 5.6l1-1"/></svg></button>
+    <button id="btnHelp" class="small">说明</button>
+  </header>
+
+  <section id="boardWrap">
+    <canvas id="board" aria-label="棋盘"></canvas>
+  </section>
+
+  <aside id="side">
+    <div id="wrBox" hidden>
+      <div class="wr-labels"><span id="wrLeft"></span><span id="wrRight"></span></div>
+      <div class="wrbar"><div id="wrFill"></div></div>
+    </div>
+    <div id="status"></div>
+
+    <div id="playBar" class="bar">
+      <button id="btnNew">新局</button>
+      <button id="btnUndo">悔棋</button>
+      <button id="btnHint">提示</button>
+      <button id="btnFlip">翻转</button>
+      <button id="btnResign">认输</button>
+      <label class="chip"><input type="checkbox" id="chkCoach">讲解</label>
+      <label class="chip"><input type="checkbox" id="chkThreat">标出危险</label>
+    </div>
+    <div id="viewBar" class="bar review" hidden>
+      <b id="viewText"></b>
+      <button id="btnViewPrev">上一手</button>
+      <button id="btnViewNext">下一手</button>
+      <button id="btnViewBack" class="primary">回到当前</button>
+    </div>
+
+    <div id="learnBar" class="bar" hidden>
+      <select id="selLesson"></select>
+      <button id="btnStepPrev">上一步</button>
+      <button id="btnStepNext" class="primary">下一步</button>
+      <button id="btnStepRetry">重来</button>
+      <button id="btnStepHint">提示</button>
+    </div>
+
+    <div id="gamesBar" class="bar" hidden>
+      <select id="selGame"></select>
+      <button id="btnGFirst">开头</button>
+      <button id="btnGPrev">上一手</button>
+      <button id="btnGNext" class="primary">下一手</button>
+      <button id="btnGLast">最后</button>
+      <button id="btnGAuto">自动播放</button>
+      <input type="range" id="rngGame" min="0" max="0" value="0">
+    </div>
+
+    <div id="practiceBar" class="bar" hidden>
+      <select id="selPuzzle"></select>
+      <button id="btnPzPrev">上一题</button>
+      <button id="btnPzNext">下一题</button>
+      <button id="btnPzRetry">重做</button>
+      <button id="btnPzHint">提示</button>
+    </div>
+
+    <div id="coach"></div>
+    <div id="moveList" class="move-list"></div>
+  </aside>
+</div>
+
+<div id="toast" hidden></div>
+<div id="updateBar" hidden><span>新版本已下载好</span><button id="btnReload" class="small primary">立即更新</button></div>
+
+<dialog id="dlgNew">
+  <form method="dialog">
+    <h2>对局设置</h2>
+    <label class="row">对手
+      <select name="opp">
+        <option value="ai">AI（电脑）</option>
+        <option value="human">真人（两个人在同一台设备上轮流下）</option>
+      </select>
+    </label>
+    <label class="row">我执 <select name="side"></select></label>
+    <label class="row">AI 难度 <select name="level"></select></label>
+    <p class="note" id="levelNote"></p>
+    <menu>
+      <button value="cancel">取消</button>
+      <button value="apply">只改难度</button>
+      <button value="ok" class="primary">开始新局</button>
+    </menu>
+  </form>
+</dialog>
+
+<dialog id="dlgPromo">
+  <form method="dialog">
+    <h2>兵升变为</h2>
+    <menu class="promo">
+      <button value="q" class="primary">后</button>
+      <button value="r">车</button>
+      <button value="b">象</button>
+      <button value="n">马</button>
+    </menu>
+  </form>
+</dialog>
+
+<dialog id="dlgMsg">
+  <form method="dialog">
+    <h2 id="msgTitle"></h2>
+    <div id="msgBody"></div>
+    <menu><button value="ok" class="primary">好</button></menu>
+  </form>
+</dialog>
+
+<dialog id="dlgHelp">
+  <form method="dialog">
+    <h2 id="helpTitle">说明</h2>
+    <div class="help" id="helpBody"></div>
+    <menu><button value="ok" class="primary">知道了</button></menu>
+  </form>
+</dialog>
+
+<script src="menu.js"></script>
+<script src="cc/chess.js"></script>
+<script src="cc/xiangqi.js"></script>
+<script src="cc/data-chess.js"></script>
+<script src="cc/data-xiangqi.js"></script>
+<script src="cc/app.js"></script>
+</body>
+</html>

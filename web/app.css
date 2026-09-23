@@ -342,3 +342,20 @@ dialog menu { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8p
 
 /* v3.1 夜晚模式：对话框里的输入框 */
 #dlgSync input, #dlgUser input, #dlgAI input, #dlgAI select { background: var(--field); color: var(--ink); }
+
+/* v3.3 菜单 */
+#btnMenu { padding: 2px 6px; line-height: 0; }
+#btnMenu svg { width: 20px; height: 20px; display: block; }
+#menuShade { position: fixed; inset: 0; background: rgba(0, 0, 0, .35); z-index: 20; }
+#menuPanel {
+  position: absolute; top: 0; left: 0; bottom: 0; width: min(300px, 82vw);
+  background: var(--card); color: var(--ink); box-shadow: 4px 0 20px rgba(0, 0, 0, .3);
+  padding: calc(env(safe-area-inset-top) + 14px) 12px 12px calc(env(safe-area-inset-left) + 12px);
+  display: flex; flex-direction: column; gap: 8px; overflow-y: auto;
+}
+.menu-title { font-size: 18px; font-weight: 700; margin: 2px 4px 6px; }
+.menu-item { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); color: var(--ink); text-decoration: none; }
+.menu-item b { font-size: 16px; }
+.menu-item span { font-size: 12.5px; color: var(--muted); }
+.menu-item.on { border-color: var(--accent); background: var(--on); }
+.menu-item.on b { color: var(--accent); }
