@@ -253,3 +253,20 @@ dialog menu { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8p
 #askAnswer:not(:empty) { margin-top: 8px; padding-top: 6px; border-top: 1px dashed var(--line); }
 #askAnswer .q { color: var(--blue); font-weight: 600; }
 @media (min-aspect-ratio: 1/1) { #askPanel { max-height: 45%; overflow-y: auto; } }
+
+/* v2.3 */
+.bar.review { background: #e3eefc; border: 1px solid #b7cff0; border-radius: 10px; padding: 6px; }
+.bar.review b { flex: 1 1 100%; font-size: 13.5px; color: var(--blue); }
+#selProblem { flex: 1 1 100%; }
+.path { padding-left: 20px; margin: 4px 0; }
+.path li { margin: 4px 0; }
+.help ol { margin: 0; padding-left: 20px; }
+.cm .prompt { font-size: 16px; font-weight: 700; }
+.cm.right { border-left-color: var(--good); }
+.cm.wrong { border-left-color: var(--bad); }
+@media (max-width: 600px) {
+  #top h1 { display: none; }
+  #top { gap: 8px; }
+  .tabs button { padding: 3px 10px; }
+}
+#app { align-content: start; }

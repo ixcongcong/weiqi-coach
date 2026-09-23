@@ -1,10 +1,12 @@
 'use strict';
-/* 围棋对战教练：界面、对局流程、棋谱学习、讲解。引擎在 engine.js，计算在 Web Worker 里进行。 */
+/* 围棋对战教练：对战、学习（课程与名局）、练习、提问。
+ * 引擎在 engine.js；蒙特卡洛计算在 Web Worker 里进行，局部死活计算在主线程（很快）。 */
 
-const APP_VERSION = '2.2';
+const APP_VERSION = '2.3';
 const G = window.Go;
 const { EMPTY, BLACK, WHITE, PASS, NONE, RESIGN } = G;
 const GAMES = window.GAMES || [];
+const PROBLEMS = window.PROBLEMS || [];
 
 const LEVELS = [
   { name: '入门', playouts: 300, ms: 1000, random: true },
@@ -22,6 +24,8 @@ const BUDGET = {
 const STUDY_BUDGET = { playouts: 2500, ms: 2000, own: 200 };
 const FINAL_OWN = { 9: 1200, 13: 900, 19: 600 };
 const STORE_KEY = 'weiqi-coach-v1';
+const RECORDS_KEY = 'weiqi-coach-records';
+const LEVEL_NAMES = { 1: '第 1 级：吃子入门', 2: '第 2 级：吃子技巧', 3: '第 3 级：对杀与死活' };
 
 const $ = id => document.getElementById(id);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -29,6 +33,15 @@ const pct = v => Math.round(v * 100) + '%';
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const colorName = c => (c === BLACK ? '黑' : '白');
 const esc = s => String(s).replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
+
+function sgfPt(b, s) {
+  return s === 'tt' ? PASS : b.pt(s.charCodeAt(0) - 97, s.charCodeAt(1) - 97);
+}
+function sgfList(b, s) {
+  const r = [];
+  for (let k = 0; k < s.length; k += 2) r.push(sgfPt(b, s.slice(k, k + 2)));
+  return r;
+}
 
 // ---------------- Worker 池 ----------------
 
@@ -130,8 +143,8 @@ const pool = new Pool();
 
 const S = {
   mode: 'play',
-  game: { size: 9, human: BLACK, handicap: 0, komi: 7.5 },
-  prefs: { level: 2, target: 100, coach: true, confirm: false, cands: false, own: false },
+  game: { size: 9, human: BLACK, handicap: 0, komi: 7.5, rule: 'normal', captureN: 1 },
+  prefs: { level: 0, target: 100, coach: true, confirm: false, cands: false, own: false, helper: true },
   setup: [],
   history: [],
   result: null,
@@ -143,22 +156,33 @@ const S = {
   scoringBusy: false,
   aiThinking: false,
   hint: null,
-  view: null,
+  view: null,       // 回看：显示第 view 手之前的局面
+  tries: [],        // 回看时的试下着法
+  tryNote: null,
   gen: 0,
   ghost: NONE,
   pendingTap: NONE,
+  done: { lessons: {}, problems: {}, yi: {} },
 };
 
-// 提问的状态：pick = 等待在棋盘上点一个点 / 一块棋；mark = 棋盘上要圈出来的棋子
+// 提问
 const Q = { open: false, pick: null, seq: 0, mark: null };
 
-// 棋谱学习的状态
+// 学习（课程 + 名局）
 const T = {
   gi: 0, idx: 0, gen: 0,
   analyses: [], aprom: [], comments: {},
   guess: false, hit: 0, tried: 0, lastGuess: null,
   auto: 0, cache: null,
 };
+
+// 《弈》课程：当前练习、作答反馈、按步走的进度
+const YI = { ex: 0, fb: {}, pos: 0, board: null, numbers: false, input: '' };
+
+// 练习
+const P = { i: 0, board: null, phase: 'ask', msg: '', showTip: false, anim: 0, last: NONE };
+
+const captureRule = () => S.game.rule === 'capture';
 
 function boardAt(k) {
   const b = new G.Board(S.game.size);
@@ -175,30 +199,36 @@ function save() {
   try {
     localStorage.setItem(STORE_KEY, JSON.stringify({
       mode: S.mode, game: S.game, prefs: S.prefs, setup: S.setup, history: S.history,
-      result: S.scoring ? null : S.result, comments: S.comments,
-      study: { gi: T.gi, idx: T.idx },
+      result: S.scoring ? null : S.result, comments: S.comments, done: S.done,
+      study: { gi: T.gi, idx: T.idx }, practice: { i: P.i },
     }));
   } catch (e) { /* 存储不可用时忽略 */ }
 }
 
+/** 读取保存的状态；返回 true 表示这是第一次打开。 */
 function load() {
+  let first = true;
   try {
     const d = JSON.parse(localStorage.getItem(STORE_KEY) || 'null');
     if (d) {
+      first = false;
       Object.assign(S.game, d.game);
       Object.assign(S.prefs, d.prefs);
       S.setup = d.setup || [];
       S.history = d.history || [];
       S.result = d.result || null;
       S.comments = d.comments || {};
-      S.mode = d.mode === 'study' ? 'study' : 'play';
+      S.done = Object.assign({ lessons: {}, problems: {}, yi: {} }, d.done || {});
+      S.mode = ['play', 'study', 'practice'].includes(d.mode) ? d.mode : 'play';
       if (d.study) {
         T.gi = clamp(d.study.gi | 0, 0, Math.max(0, GAMES.length - 1));
         T.idx = d.study.idx | 0;
       }
+      if (d.practice) P.i = clamp(d.practice.i | 0, 0, Math.max(0, PROBLEMS.length - 1));
     }
-  } catch (e) { /* 数据损坏时从新局开始 */ }
+  } catch (e) { /* 数据损坏时从头开始 */ }
   rebuild();
+  return first;
 }
 
 /** 停掉所有后台计算，让进行中的结果作废。 */
@@ -262,6 +292,11 @@ async function step() {
   const gen = S.gen;
   while (gen === S.gen && S.mode === 'play' && !S.result && !S.scoring && !S.scoringBusy) {
     const k = S.history.length;
+    if (captureRule()) {
+      if (S.board.toPlay === S.game.human) return;
+      await captureTurn(gen);
+      continue;
+    }
     const a = await getAnalysis(k);
     if (gen !== S.gen || !a) return;
     if (S.history.length !== k) continue;
@@ -334,6 +369,7 @@ async function aiTurn(gen, k) {
   S.aiThinking = false;
   if (move === RESIGN) {
     S.result = { text: 'AI 认输，你赢了！', winner: S.game.human };
+    recordGame();
     save();
     render();
     showMessage('对局结束', 'AI 认输，你赢了！', true);
@@ -343,14 +379,63 @@ async function aiTurn(gen, k) {
   playMove(move, true);
 }
 
+/** 吃子棋的 AI：规则很简单，不需要大量计算。 */
+async function captureTurn(gen) {
+  S.aiThinking = true;
+  render();
+  await sleep(450);
+  if (gen !== S.gen) return;
+  const lvl = S.prefs.level <= 0 ? 0 : S.prefs.level === 1 ? 1 : 2;
+  const move = G.captureMove(S.board.copy(), G.makeRng((Math.random() * 1e9) | 0), lvl);
+  S.aiThinking = false;
+  playMove(move, true);
+}
+
+function checkCaptureWin() {
+  const b = S.board, n = S.game.captureN;
+  const w = b.capB >= n ? BLACK : b.capW >= n ? WHITE : 0;
+  if (!w) return false;
+  const you = w === S.game.human;
+  S.result = { text: you ? `你先吃到 ${n} 个子，你赢了！` : `AI 先吃到 ${n} 个子，AI 赢了`, winner: w };
+  recordGame();
+  save();
+  setTimeout(() => showMessage('吃子棋结束', `${S.result.text}\n\n${you ? '很好！试试把“先吃到几个子”调高一点。' : '点“回看”看看是哪一步被叫吃了，想一想怎么逃。'}`, true), 300);
+  return true;
+}
+
+function atariGroups(b, color) {
+  const seen = new Set(), out = [];
+  for (let p = 0; p < b.size; p++) {
+    if (b.b[p] !== color || seen.has(p)) continue;
+    const g = G.groupLibs(b, p);
+    g.stones.forEach(s => seen.add(s));
+    if (g.libs.length === 1) out.push(g);
+  }
+  return out;
+}
+
 function playMove(m, internal) {
+  const mover = S.board.toPlay;
   if (!S.board.play(m)) return false;
   S.history.push(m);
+  if (S.history.length % 10 === 0) recordGame('未下完');
   S.hint = null;
   Q.mark = null;
   S.pendingTap = NONE;
   save();
-  if (S.board.passes >= 2) startScoring();
+  if (captureRule()) {
+    captureComment(S.history.length - 1);
+    if (!checkCaptureWin() && S.prefs.helper && mover !== S.game.human) {
+      const at = atariGroups(S.board, S.game.human);
+      if (at.length) toast(`注意：你的 ${at.reduce((n, g) => n + g.stones.length, 0)} 个子被叫吃了（红圈）！`);
+    }
+  } else {
+    if (S.board.passes >= 2) startScoring();
+    else if (S.prefs.helper && mover !== S.game.human) {
+      const at = atariGroups(S.board, S.game.human);
+      if (at.length) toast(`注意：你的 ${at.reduce((n, g) => n + g.stones.length, 0)} 个子被叫吃了（红圈）`);
+    }
+  }
   render();
   if (!internal) advance();
   return true;
@@ -364,6 +449,7 @@ async function startScoring() {
   if (!o || gen !== S.gen) return;
   S.scoringBusy = false;
   S.scoring = new G.Scoring(S.board, G.guessDead(pos, o.own), S.game.komi);
+  recordGame();
   render();
   const won = S.scoring.winner() === S.game.human;
   showMessage('对局结束', `${scoreText()}\n\n${won ? '你赢了！' : 'AI 获胜'}\n\n如果死活判断有误，可以点棋盘上的棋子切换死活。`, true);
@@ -372,7 +458,7 @@ async function startScoring() {
 function scoreText() {
   const sc = S.scoring;
   const d = sc.diff();
-  return `黑 ${sc.black} 子，白 ${sc.white} 子（贴 ${S.game.komi}）\n${d > 0 ? '黑' : '白'}胜 ${Math.abs(d)} 子`;
+  return `黑 ${sc.black}，白 ${sc.white}（黑贴 ${S.game.komi}）\n${d > 0 ? '黑' : '白'}胜 ${Math.abs(d)}`;
 }
 
 // ---------------- 对战：讲解 ----------------
@@ -422,8 +508,29 @@ async function makeComment(j) {
   }
 }
 
+/** 吃子棋的讲解：只讲吃子、叫吃、逃子这些手段。 */
+function captureComment(j) {
+  const pre = boardAt(j), m = S.history[j], c = pre.toPlay;
+  const you = c === S.game.human, me = you ? '你' : 'AI', op = you ? 'AI' : '你';
+  const reasons = G.explain(pre, m, c, null, null, me, op);
+  const after = boardAt(j + 1);
+  const threat = atariGroups(after, 3 - c);
+  if (!you && threat.length) reasons.push('AI 在叫吃你的棋！想一想：往外长能不能长出 3 口气？能不能反过来提掉叫吃你的子？');
+  if (you && atariGroups(after, c).length) reasons.push('小心：你自己还有棋子只剩一口气（红圈）。');
+  S.comments[j] = { j, you, move: m, name: pre.name(m), reasons, simple: true };
+}
+
 async function showHint() {
   if (!canHumanMove()) return;
+  if (captureRule()) {
+    const b = S.board.copy();
+    const m = G.captureMove(b.copy(), G.makeRng(7), 2);
+    if (m === PASS) { toast('没有好的着法了'); return; }
+    S.hint = { move: m, name: b.name(m), wr: null, reasons: G.explain(b, m, b.toPlay, null, null, '你', 'AI'), others: [] };
+    Q.mark = [m];
+    render();
+    return;
+  }
   const gen = S.gen, k = S.history.length;
   S.hint = { loading: true };
   render();
@@ -446,9 +553,11 @@ async function showHint() {
 // ---------------- 对战：操作 ----------------
 
 function newGame(opts) {
+  if (S.history.length && !S.result && !S.scoring) recordGame('未下完');
   cancelWork();
   Object.assign(S.game, opts);
   S.setup = G.handicapPoints(S.game.size, S.game.handicap);
+  S.game.recId = null;
   S.history = [];
   S.result = null;
   S.comments = {};
@@ -456,7 +565,7 @@ function newGame(opts) {
   S.aprom = [];
   S.scoring = null;
   S.hint = null;
-  S.view = null;
+  exitReview();
   rebuild();
   save();
   layout();
@@ -470,7 +579,7 @@ function undo() {
   S.result = null;
   S.scoring = null;
   S.hint = null;
-  S.view = null;
+  exitReview();
   do {
     S.history.pop();
     rebuild();
@@ -495,6 +604,7 @@ function resign() {
       label: '认输', primary: true, fn: () => {
         cancelWork();
         S.result = { text: '你认输了，AI 获胜', winner: 3 - S.game.human };
+        recordGame();
         save();
         render();
       },
@@ -502,27 +612,165 @@ function resign() {
   ]);
 }
 
-function openReview(j) {
-  if (j >= S.history.length) return;
-  S.view = S.view === j ? null : j;
-  if (S.view !== null && !S.analyses[j]) getAnalysis(j);
+// ---------------- 对局记录（每一盘都保存在本机） ----------------
+
+let RECORDS = [];
+function loadRecords() {
+  try { RECORDS = JSON.parse(localStorage.getItem(RECORDS_KEY) || '[]'); } catch (e) { RECORDS = []; }
+}
+function saveRecords() {
+  try { localStorage.setItem(RECORDS_KEY, JSON.stringify(RECORDS)); } catch (e) { toast('本机存储空间不足，对局记录没有保存成功'); }
+}
+
+/** 把当前这盘棋存成一条记录（同一盘棋反复调用只会更新同一条）。 */
+function recordGame(status) {
+  if (!S.history.length) return;
+  const b0 = new G.Board(S.game.size), sg2 = p => (p === PASS ? 'tt' : String.fromCharCode(97 + b0.x(p)) + String.fromCharCode(97 + b0.y(p)));
+  if (!S.game.recId) S.game.recId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+  const g = S.game, b = S.board;
+  let result = status;
+  if (S.result) result = S.result.text;
+  else if (S.scoring) result = `${S.scoring.winner() === BLACK ? '黑' : '白'}胜 ${Math.abs(S.scoring.diff())}（${S.scoring.winner() === g.human ? '你赢了' : 'AI 赢了'}）`;
+  const rec = {
+    id: g.recId, date: new Date().toISOString(), size: g.size, human: g.human, rule: g.rule, captureN: g.captureN,
+    handicap: g.handicap, komi: g.komi, level: LEVELS[S.prefs.level].name, target: S.prefs.target,
+    ab: S.setup.map(sg2).join(''), moves: S.history.map(sg2).join(''), moveCount: S.history.length,
+    result, won: S.result ? S.result.winner === g.human : S.scoring ? S.scoring.winner() === g.human : null,
+    caps: [b.capB, b.capW],
+  };
+  const i = RECORDS.findIndex(r => r.id === rec.id);
+  if (i >= 0) RECORDS[i] = Object.assign(RECORDS[i], rec); else RECORDS.unshift(rec);
+  saveRecords();
+  fillGameSelect();
+}
+
+function recordToGame(r) {
+  const d = new Date(r.date);
+  const when = `${d.getMonth() + 1}月${d.getDate()}日 ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  const you = r.human === BLACK ? '黑' : '白';
+  return {
+    kind: 'mine', id: r.id, group: '我的对局（保存在本机）',
+    title: `${when} · ${r.size}路${r.rule === 'capture' ? ` 吃子棋（${r.captureN} 子）` : ''} · 你执${you} · ${r.won === true ? '赢' : r.won === false ? '输' : '未下完'}`,
+    size: r.size, komi: r.komi, black: r.human === BLACK ? '你' : `AI（${r.level}）`, white: r.human === WHITE ? '你' : `AI（${r.level}）`,
+    year: d.getFullYear(), result: r.result || '未下完', notes: {},
+    intro: `你在 ${d.toLocaleString('zh-CN')} 下的一盘棋，共 ${r.moveCount} 手，结果：${r.result || '未下完'}。一步步回看，留意胜率大幅下降的地方；打开“猜棋”，看看自己能不能找到 AI 推荐的下法。`,
+    ab: r.ab, aw: '', first: r.ab ? 'W' : 'B', moves: r.moves,
+  };
+}
+
+function exportRecords() {
+  const data = JSON.stringify({ app: 'weiqi-coach', version: 1, exported: new Date().toISOString(), records: RECORDS, done: S.done }, null, 1);
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([data], { type: 'application/json' }));
+  a.download = `围棋对局记录-${new Date().toISOString().slice(0, 10)}.json`;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+}
+
+/** 导入：按记录 ID 合并，不会删除本机已有的记录。 */
+function importRecords(file) {
+  const fr = new FileReader();
+  fr.onload = () => {
+    try {
+      const d = JSON.parse(fr.result);
+      if (d.app !== 'weiqi-coach' || !Array.isArray(d.records)) throw new Error('bad');
+      let added = 0;
+      for (const r of d.records) {
+        if (!r || !r.id || typeof r.moves !== 'string') continue;
+        const i = RECORDS.findIndex(x => x.id === r.id);
+        if (i < 0) { RECORDS.push(r); added++; } else if ((r.moveCount || 0) > (RECORDS[i].moveCount || 0)) RECORDS[i] = r;
+      }
+      RECORDS.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+      if (d.done) for (const k of ['lessons', 'problems', 'yi']) Object.assign(S.done[k], d.done[k] || {});
+      saveRecords();
+      save();
+      fillGameSelect();
+      fillProblemSelect();
+      toast(`导入完成：新增 ${added} 盘对局，学习进度已合并`);
+    } catch (e) {
+      toast('这个文件不是本程序导出的对局记录');
+    }
+  };
+  fr.readAsText(file);
+}
+
+// ---------------- 回看（不改变对局） ----------------
+
+function enterReview(j) {
+  if (!S.history.length) { toast('还没有下棋，没有可以回看的'); return; }
+  if (j === undefined) {
+    // 默认回到你最近一手之前：看看当时该怎么下
+    j = S.history.length - 1;
+    for (let k = S.history.length - 1; k >= 0; k--) {
+      if (boardAt(k).toPlay === S.game.human) { j = k; break; }
+    }
+  }
+  S.view = clamp(j, 0, S.history.length - 1);
+  S.tries = [];
+  S.tryNote = null;
+  if (!captureRule() && !S.analyses[S.view]) getAnalysis(S.view);
   render();
 }
 
-// ---------------- 棋谱学习 ----------------
+function exitReview() {
+  S.view = null;
+  S.tries = [];
+  S.tryNote = null;
+}
+
+function reviewStep(d) {
+  if (S.view === null) return;
+  const j = clamp(S.view + d, 0, S.history.length - 1);
+  if (j === S.view) return;
+  S.view = j;
+  S.tries = [];
+  S.tryNote = null;
+  if (!captureRule() && !S.analyses[j]) getAnalysis(j);
+  render();
+}
+
+function reviewBoard() {
+  const b = boardAt(S.view);
+  for (const m of S.tries) b.play(m);
+  return b;
+}
+
+async function reviewTry(p) {
+  const b = reviewBoard();
+  if (b.b[p] !== EMPTY) return;
+  if (!b.isLegal(p, b.toPlay)) { toast('这里不能下'); return; }
+  const first = S.tries.length === 0, c = b.toPlay;
+  S.tries.push(p);
+  render();
+  if (!first || captureRule()) return;
+  // 试下的第一手：评价一下它和实战、和 AI 推荐的差别
+  const j = S.view, gen = S.gen;
+  S.tryNote = { name: b.name(p), text: '正在分析这手试下…' };
+  render();
+  const A = await getAnalysis(j);
+  const after = b.copy();
+  after.play(p);
+  const B = await pool.analyze(after, BUDGET[S.game.size], S.game.komi);
+  if (!A || !B || gen !== S.gen || S.view !== j || S.tries[0] !== p) return;
+  const top = A.cands[0];
+  const wrMove = 1 - B.wr, isBest = top && top.move === p;
+  const q = quality(isBest ? 0 : Math.max(0, (top ? top.wr : wrMove) - wrMove), isBest);
+  const who = c === S.game.human ? '你' : 'AI';
+  S.tryNote = {
+    name: b.name(p), q, wr: wrMove, best: top && !isBest ? { name: b.name(top.move), wr: top.wr } : null,
+    reasons: G.explain(b, p, c, A.own, B.own, who, who === '你' ? 'AI' : '你'), who,
+  };
+  render();
+}
+
+// ---------------- 学习：课程与名局 ----------------
 
 function sg() { return GAMES[T.gi]; }
 
-function sgfPt(b, s) {
-  return s === 'tt' ? PASS : b.pt(s.charCodeAt(0) - 97, s.charCodeAt(1) - 97);
-}
-
 function gameMoves(g) {
-  if (!g._moves) {
-    const b = new G.Board(g.size);
-    g._moves = [];
-    for (let i = 0; i < g.moves.length; i += 2) g._moves.push(sgfPt(b, g.moves.slice(i, i + 2)));
-  }
+  if (g.kind === 'yi') return [];
+  if (!g._moves) g._moves = sgfList(new G.Board(g.size), g.moves);
   return g._moves;
 }
 
@@ -530,14 +778,12 @@ function studyBoardAt(i) {
   const g = sg();
   if (T.cache && T.cache.gi === T.gi && T.cache.i === i) return T.cache.b.copy();
   const b = new G.Board(g.size);
-  const pts = s => {
-    const r = [];
-    for (let k = 0; k < s.length; k += 2) r.push(sgfPt(b, s.slice(k, k + 2)));
-    return r;
-  };
-  b.setupStones(pts(g.ab), pts(g.aw), g.first === 'W' ? WHITE : BLACK);
+  b.setupStones(sgfList(b, g.ab), sgfList(b, g.aw), g.first === 'W' ? WHITE : BLACK);
   const mv = gameMoves(g);
-  for (let k = 0; k < i && k < mv.length; k++) b.play(mv[k]);
+  for (let k = 0; k < i && k < mv.length; k++) {
+    // 课程里有“停一手”，棋谱里颜色可能不严格交替：按记录的颜色走
+    b.play(mv[k]);
+  }
   T.cache = { gi: T.gi, i, b: b.copy() };
   return b;
 }
@@ -563,10 +809,11 @@ function studyComment(i) {
   const A = T.analyses[i], B = T.analyses[i + 1];
   if (!A || !B) return;
   const pre = studyBoardAt(i), m = gameMoves(sg())[i], c = pre.toPlay;
+  if (m === PASS) { T.comments[i] = { reasons: ['停一手。'], top: null, blackWr: B.toPlay === BLACK ? B.wr : 1 - B.wr }; return; }
   const top = A.cands[0];
   let reasons = G.explain(pre, m, c, A.own, B.own, colorName(c), colorName(3 - c));
-  if (sg().kind !== 'lesson') {
-    // 本机引擎远弱于名局里的高手：不让它给大师的棋下“亏了”的结论
+  if (sg().kind === 'game') {
+    // 本机引擎远弱于名局里的高手：不让它给高手的棋下“亏了”的结论
     const n0 = reasons.length;
     reasons = reasons.filter(r => !r.startsWith('这手棋让形势亏了') && !r.startsWith('一路的棋通常价值很小'));
     if (reasons.length < n0 || !reasons.length) {
@@ -581,9 +828,16 @@ function studyComment(i) {
 }
 
 function studyGo(idx) {
-  const n = gameMoves(sg()).length;
+  const g = sg();
+  if (g.kind === 'yi') { save(); render(); return; }
+  const n = gameMoves(g).length;
   T.idx = clamp(idx, 0, n);
   Q.mark = null;
+  if (g.kind === 'lesson' && T.idx === n && !S.done.lessons[g.id]) {
+    S.done.lessons[g.id] = true;
+    fillGameSelect();
+    toast('这一课学完了！');
+  }
   const want = new Set([T.idx - 1, T.idx, T.idx + 1].filter(i => i >= 0 && i <= n));
   const stale = T.aprom.some((p, i) => p && !T.analyses[i] && !want.has(i));
   if (stale) {
@@ -597,6 +851,7 @@ function studyGo(idx) {
 }
 
 function selectGame(gi) {
+  if (!GAMES[gi]) return;
   stopAuto();
   T.gen++;
   pool.cancel();
@@ -607,7 +862,110 @@ function selectGame(gi) {
   T.cache = null;
   T.hit = T.tried = 0;
   T.lastGuess = null;
+  if (sg().kind === 'yi') yiSelect(0);
+  layout();
   studyGo(0);
+}
+
+// ---------------- 《弈》课程 ----------------
+
+function yiEx() { return sg().exercises[YI.ex]; }
+
+/** 根据当前练习（以及按步走的进度）摆出棋盘。 */
+function yiSetBoard() {
+  const e = yiEx();
+  if (!e || !e.board) { YI.board = null; return; }
+  const n = e.board.size, b = new G.Board(n);
+  const P0 = i => b.pt(i % n, Math.floor(i / n));
+  b.setupStones(e.board.black.map(P0), e.board.white.map(P0), e.toPlay || BLACK);
+  if (e.type === 'play') {
+    for (let k = 0; k < YI.pos; k++) { b.toPlay = e.line[k].color; b.play(P0(e.line[k].index)); }
+    if (YI.pos < e.line.length) b.toPlay = e.line[YI.pos].color;
+  }
+  YI.board = b;
+}
+
+function yiSelect(k) {
+  const g = sg();
+  YI.ex = clamp(k, 0, Math.max(0, g.exercises.length - 1));
+  YI.pos = 0;
+  YI.input = '';
+  yiSetBoard();
+  layout();
+}
+
+function yiIndex(p) {
+  const e = yiEx(), n = e.board.size;
+  return YI.board.y(p) * n + YI.board.x(p);
+}
+
+function yiAnswer(correct, detail) {
+  const e = yiEx(), g = sg();
+  YI.fb[e.id] = { correct, text: correct ? e.explanation : `还没答对。${e.hint || ''}${detail ? ' ' + detail : ''}` };
+  if (correct) {
+    S.done.yi[e.id] = true;
+    if (g.exercises.every(x => S.done.yi[x.id]) && !S.done.lessons[g.id]) {
+      S.done.lessons[g.id] = true;
+      fillGameSelect();
+      toast(`第 ${g.num} 课的练习全部通过！`);
+    }
+    save();
+  }
+  render();
+}
+
+function yiTap(p) {
+  const e = yiEx();
+  if (!e || !e.board || p === NONE) return;
+  const idx = yiIndex(p);
+  if (e.type === 'point') {
+    yiAnswer(e.answers.includes(idx));
+  } else if (e.type === 'play') {
+    if (YI.pos >= e.line.length) return;
+    const want = e.line[YI.pos];
+    if (idx !== want.index) {
+      yiAnswer(false, `这一步应该由${colorName(want.color)}棋下。`);
+      return;
+    }
+    YI.pos++;
+    yiSetBoard();
+    if (YI.pos >= e.line.length) yiAnswer(true);
+    else { delete YI.fb[e.id]; render(); }
+  }
+}
+
+function yiCoachHtml() {
+  const g = sg(), exs = g.exercises, e = exs[YI.ex];
+  const allDone = exs.length && exs.every(x => S.done.yi[x.id]);
+  let h = `<div class="cm game"><div class="h"><b>第 ${g.num} 课 · ${esc(g.title)}</b><span class="wr">第 ${g.stage} 阶段 ${esc(g.stageTitle)} · 约 ${g.minutes} 分钟</span></div>
+    ${g.subtitle ? `<p class="note">${esc(g.subtitle)}</p>` : ''}
+    ${g.objectives.length ? `<div class="note">学习目标：</div><ul>${g.objectives.map(o => `<li>${esc(o)}</li>`).join('')}</ul>` : ''}</div>`;
+  for (const sec of g.sections) h += `<div class="cm"><b>${esc(sec.heading)}</b><p>${esc(sec.body)}</p></div>`;
+  if (e) {
+    const fb = YI.fb[e.id];
+    h += `<div class="cm ${fb ? (fb.correct ? 'right' : 'wrong') : 'hint'}"><div class="h"><b>课后练习 ${YI.ex + 1} / ${exs.length}</b>
+      <span class="wr">${S.done.yi[e.id] ? '已答对' : ''}</span></div><p class="prompt">${esc(e.prompt)}</p>`;
+    if (e.type === 'choice') {
+      h += '<div class="keys">' + e.options.map((o, i) => `<button data-opt="${i}">${esc(o)}</button>`).join('') + '</div>';
+    } else if (e.type === 'number') {
+      h += `<form class="ask-form" data-num="1"><input id="yiNum" type="number" inputmode="numeric" placeholder="填一个数字" value="${esc(YI.input)}"><button class="primary small">确定</button></form>`;
+    } else if (e.type === 'point') {
+      h += '<p class="note">在棋盘上点你的答案。</p>';
+    } else if (e.type === 'play') {
+      h += `<p class="note">在棋盘上按顺序下出这几步（黑白都由你来下）。已下 ${YI.pos} / ${e.line.length} 步${YI.pos < e.line.length ? `，下一步轮到${colorName(e.line[YI.pos].color)}` : ''}。</p>`;
+    }
+    if (fb) h += `<p><b>${fb.correct ? '答对了！' : ''}</b>${esc(fb.text)}</p>`;
+    h += `<div class="keys">${YI.ex > 0 ? '<button data-yi="prev">上一题</button>' : ''}
+      ${e.type === 'play' ? '<button data-yi="reset">重新下</button>' : ''}
+      ${e.board ? `<button data-yi="numbers">${YI.numbers ? '隐藏编号' : '显示编号'}</button>` : ''}
+      ${YI.ex < exs.length - 1 ? '<button data-yi="next" class="on">下一题</button>' : ''}</div>`;
+    if (e.board) h += '<p class="note">题目里的数字是点位编号：从左上角 0 开始逐行往右数；点“显示编号”可以在棋盘上对照。</p>';
+    h += '</div>';
+  }
+  if (allDone || !exs.length) {
+    h += `<div class="cm best"><b>本课要点</b><div class="key">${esc(g.takeaway)}</div>${g.practice ? `<p class="note">课后实践：${esc(g.practice)}</p>` : ''}</div>`;
+  }
+  return h;
 }
 
 function stopAuto() {
@@ -640,17 +998,133 @@ function studyTap(p) {
   studyGo(T.idx + 1);
 }
 
+// ---------------- 练习 ----------------
+
+function pb() { return PROBLEMS[P.i]; }
+
+function practiceStart() {
+  clearTimeout(P.anim);
+  const q = pb();
+  if (!q) return;
+  const b = new G.Board(q.size);
+  b.setupStones(sgfList(b, q.ab), sgfList(b, q.aw), BLACK);
+  P.board = b;
+  P.phase = 'ask';
+  P.msg = '';
+  P.showTip = false;
+  P.last = NONE;
+  layout();
+  save();
+  render();
+}
+
+function practiceGo(i) {
+  P.i = clamp(i, 0, PROBLEMS.length - 1);
+  practiceStart();
+}
+
+/** 自动演示一串着法。 */
+function practicePlayLine(moves, then) {
+  clearTimeout(P.anim);
+  let k = 0;
+  const stepLine = () => {
+    if (k >= moves.length) { if (then) then(); render(); return; }
+    P.board.play(moves[k]);
+    P.last = moves[k];
+    k++;
+    render();
+    P.anim = setTimeout(stepLine, 650);
+  };
+  stepLine();
+}
+
+function practiceTap(p) {
+  const q = pb();
+  if (!q || p === NONE) return;
+  if (P.phase !== 'ask') { practiceStart(); return; }
+  const b = P.board;
+  if (b.b[p] !== EMPTY) return;
+  if (!b.isLegal(p, BLACK)) { toast('这里不能下（禁着点）'); return; }
+  const answers = q.answers.map(s => sgfPt(b, s));
+  if (answers.includes(p)) {
+    P.phase = 'right';
+    P.msg = '';
+    // 用正解里的主变化演示；如果答的是另一种正解，也先落这一手
+    const pv = sgfList(b, q.pv.join(''));
+    const line = pv[0] === p ? pv : [p];
+    practicePlayLine(line, () => {
+      if (!S.done.problems[q.id]) { S.done.problems[q.id] = true; fillProblemSelect(); save(); }
+    });
+    return;
+  }
+  // 答错：找出白棋的应法
+  P.phase = 'wrong';
+  const c = b.copy();
+  c.play(p);
+  const T0 = sgfPt(b, q.target), depth = Math.min(q.depth, 12);
+  let reply = null, msg;
+  if (q.goal === 'capture') {
+    const targets = [T0].concat(q.also ? [sgfPt(b, q.also)] : []);
+    if (c.b[T0] === EMPTY) reply = null;
+    else if (targets.length > 1) {
+      for (const d of new Set(targets.flatMap(t => G.groupLibs(c, t).libs))) {
+        const c2 = c.copy();
+        if (!c2.play(d)) continue;
+        if (targets.every(t => !G.attack(c2, t, depth - 1, false))) { reply = d; break; }
+      }
+    } else {
+      reply = G.findDefense(c, T0, depth, !!q.wide);
+    }
+    const lifeDeath = /点眼|对杀/.test(q.title);
+    msg = reply !== null && reply !== undefined
+      ? `不对。白下在 ${b.name(reply)}，${lifeDeath ? '白棋就活了（或者对杀赢了）' : '白棋就逃掉了'}。`
+      : '不对，这样吃不掉白棋。';
+  } else {
+    const r = G.attack(c, T0, depth, false);
+    reply = r && r.length ? r[0] : null;
+    msg = reply !== null ? `不对。白下在 ${b.name(reply)}，黑棋就活不成了。` : '不对，这样救不了黑棋。';
+  }
+  P.board.play(p);
+  P.last = p;
+  if (reply !== null && reply !== undefined && reply !== PASS) {
+    setTimeout(() => {
+      if (P.phase !== 'wrong') return;
+      P.board.play(reply);
+      P.last = reply;
+      render();
+    }, 500);
+  }
+  P.msg = msg + ' 点“重做”或点一下棋盘再试一次。';
+  P.showTip = true;
+  render();
+}
+
+function practiceAnswer() {
+  practiceStart();
+  P.phase = 'shown';
+  const q = pb();
+  practicePlayLine(sgfList(P.board, q.pv.join('')));
+}
+
+// ---------------- 模式切换 ----------------
+
 function setMode(m) {
   if (S.mode === m) return;
   stopAuto();
+  clearTimeout(P.anim);
   cancelWork();
+  exitReview();
   S.mode = m;
   S.ghost = NONE;
+  Q.mark = null;
+  if (Q.open) openAsk(false);
   save();
+  if (m === 'practice') practiceStart();
+  if (m === 'study') fillGameSelect();
   layout();
   render();
   if (m === 'play') advance();
-  else studyGo(T.idx);
+  else if (m === 'study') studyGo(T.idx);
 }
 
 // ---------------- 棋盘绘制 ----------------
@@ -699,16 +1173,23 @@ function starPoints(n) {
   return r;
 }
 
-/** 当前要画的局面，以及它的分析、候选点视角等。 */
+/** 当前要画的局面，以及它的附加信息。 */
 function boardView() {
+  if (S.mode === 'practice') {
+    return { b: P.board || new G.Board(9), practice: true, ghostColor: P.phase === 'ask' ? BLACK : 0, last: P.last };
+  }
+  if (S.mode === 'study' && sg().kind === 'yi') {
+    return { b: YI.board || new G.Board(sg().size || 9), yi: true, ghostColor: YI.board && yiEx() && (yiEx().type === 'point' || yiEx().type === 'play') ? YI.board.toPlay : 0 };
+  }
   if (S.mode === 'study') {
     const n = gameMoves(sg()).length;
-    return {
-      b: studyBoardAt(T.idx), k: T.idx, list: T.analyses, study: true,
-      ghostColor: T.guess && T.idx < n ? studyBoardAt(T.idx).toPlay : 0,
-    };
+    const b = studyBoardAt(T.idx);
+    return { b, k: T.idx, list: T.analyses, study: true, ghostColor: T.guess && T.idx < n ? b.toPlay : 0 };
   }
-  if (S.view !== null) return { b: boardAt(S.view), k: S.view, list: S.analyses, review: true };
+  if (S.view !== null) {
+    const b = reviewBoard();
+    return { b, k: S.view, list: S.analyses, review: true, ghostColor: b.toPlay };
+  }
   return { b: S.board, k: S.history.length, list: S.analyses, ghostColor: canHumanMove() ? S.game.human : 0 };
 }
 
@@ -750,9 +1231,9 @@ function drawBoard() {
   }
 
   const r = cell * 0.47;
-  const scoring = !v.study && !v.review ? S.scoring : null;
+  const scoring = S.mode === 'play' && !v.review ? S.scoring : null;
 
-  if (S.mode === 'play' && S.prefs.own && !scoring) {
+  if (S.mode === 'play' && !v.review && S.prefs.own && !scoring && !captureRule()) {
     const la = latestAnalysis(v.list, v.k);
     if (la) {
       for (let p = 0; p < b.size; p++) {
@@ -766,8 +1247,8 @@ function drawBoard() {
     }
   }
 
-  const ghost = S.pendingTap !== NONE && !v.study ? S.pendingTap : S.ghost;
-  if (v.ghostColor && ghost >= 0 && b.b[ghost] === EMPTY) {
+  const ghost = S.pendingTap !== NONE && S.mode === 'play' && !v.review ? S.pendingTap : S.ghost;
+  if (v.ghostColor && ghost >= 0 && ghost < b.size && b.b[ghost] === EMPTY) {
     ctx.strokeStyle = 'rgba(21,101,192,.45)';
     ctx.lineWidth = Math.max(2, cell * 0.06);
     ctx.beginPath();
@@ -783,6 +1264,20 @@ function drawBoard() {
     drawStone(X(p), Y(p), r, c, scoring && scoring.dead[p] ? 0.35 : 1);
   }
 
+  // 新手辅助：被叫吃（只剩一口气）的棋子套红圈
+  if (S.prefs.helper && (S.mode === 'play' || S.mode === 'practice') && !scoring) {
+    ctx.save();
+    ctx.strokeStyle = '#e53935';
+    ctx.lineWidth = Math.max(2, r * 0.13);
+    ctx.setLineDash([r * 0.35, r * 0.2]);
+    for (const color of [BLACK, WHITE]) {
+      for (const g of atariGroups(b, color)) {
+        for (const p of g.stones) { ctx.beginPath(); ctx.arc(X(p), Y(p), r * 1.08, 0, Math.PI * 2); ctx.stroke(); }
+      }
+    }
+    ctx.restore();
+  }
+
   if (scoring) {
     const h = cell * 0.16;
     for (let p = 0; p < b.size; p++) {
@@ -794,11 +1289,11 @@ function drawBoard() {
     }
   }
 
-  // 候选点：数字是走那里之后，下这手的一方的胜率
+  // 候选点：数字是走那里之后，下这手一方的胜率
   let cands = null;
-  if (v.review) {
+  if (v.review && !S.tries.length && !captureRule()) {
     if (S.analyses[S.view]) cands = S.analyses[S.view].cands.slice(0, 3);
-  } else if (!v.study && (S.prefs.cands || (S.hint && !S.hint.loading)) && canHumanMove() && S.analyses[v.k]) {
+  } else if (!v.review && S.mode === 'play' && !captureRule() && (S.prefs.cands || (S.hint && !S.hint.loading)) && canHumanMove() && S.analyses[v.k]) {
     cands = S.analyses[v.k].cands.slice(0, 3);
   }
   if (cands) {
@@ -813,27 +1308,61 @@ function drawBoard() {
     });
   }
 
+  const numberStone = (p, num, color) => {
+    ctx.fillStyle = b.b[p] === BLACK ? '#fff' : '#111';
+    ctx.font = `bold ${Math.round(cell * (num >= 100 ? 0.3 : 0.36))}px -apple-system, sans-serif`;
+    ctx.fillText(String(num), X(p), Y(p) + 1);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = Math.max(2, r * 0.12);
+    ctx.beginPath(); ctx.arc(X(p), Y(p), r * 1.02, 0, Math.PI * 2); ctx.stroke();
+  };
+
   if (v.review) {
-    const m = S.history[S.view];
-    if (m >= 0) {
-      drawStone(X(m), Y(m), r, b.toPlay, 0.55);
-      ctx.strokeStyle = '#d32f2f';
-      ctx.lineWidth = Math.max(2, r * 0.18);
-      ctx.beginPath(); ctx.arc(X(m), Y(m), r * 0.95, 0, Math.PI * 2); ctx.stroke();
+    if (S.tries.length) {
+      // 试下的棋子标上 1、2、3……
+      S.tries.forEach((m, i) => { if (b.b[m] !== EMPTY) numberStone(m, i + 1, '#1565c0'); });
+    } else {
+      const m = S.history[S.view];
+      if (m >= 0) {
+        drawStone(X(m), Y(m), r, b.toPlay, 0.55);
+        ctx.strokeStyle = '#d32f2f';
+        ctx.lineWidth = Math.max(2, r * 0.18);
+        ctx.beginPath(); ctx.arc(X(m), Y(m), r * 0.95, 0, Math.PI * 2); ctx.stroke();
+      }
+    }
+  } else if (v.study) {
+    if (b.lastMove >= 0) numberStone(b.lastMove, T.idx, '#e53935');
+  } else if (v.practice) {
+    if (v.last >= 0 && b.b[v.last] !== EMPTY) {
+      ctx.fillStyle = '#e53935';
+      ctx.beginPath(); ctx.arc(X(v.last), Y(v.last), r * 0.28, 0, Math.PI * 2); ctx.fill();
     }
   } else if (b.lastMove >= 0 && !scoring) {
-    const lm = b.lastMove;
-    if (v.study) {
-      // 棋谱里在最后一手上标出手数
-      ctx.fillStyle = b.b[lm] === BLACK ? '#fff' : '#111';
-      ctx.font = `bold ${Math.round(cell * (T.idx >= 100 ? 0.3 : 0.36))}px -apple-system, sans-serif`;
-      ctx.fillText(String(T.idx), X(lm), Y(lm) + 1);
-      ctx.strokeStyle = '#e53935';
-      ctx.lineWidth = Math.max(2, r * 0.12);
-      ctx.beginPath(); ctx.arc(X(lm), Y(lm), r * 1.02, 0, Math.PI * 2); ctx.stroke();
-    } else {
-      ctx.fillStyle = '#e53935';
-      ctx.beginPath(); ctx.arc(X(lm), Y(lm), r * 0.28, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#e53935';
+    ctx.beginPath(); ctx.arc(X(b.lastMove), Y(b.lastMove), r * 0.28, 0, Math.PI * 2); ctx.fill();
+  }
+
+  if (v.yi && YI.board && yiEx() && yiEx().board) {
+    const e = yiEx(), n0 = e.board.size;
+    ctx.font = `bold ${Math.round(cell * 0.34)}px -apple-system, sans-serif`;
+    for (let i = 0; i < n0 * n0; i++) {
+      const p = b.pt(i % n0, Math.floor(i / n0));
+      const mark = e.board.marks && e.board.marks[i];
+      const label = YI.numbers ? String(i) : mark;
+      if (!label) continue;
+      if (b.b[p] === EMPTY) {
+        ctx.fillStyle = 'rgba(233,194,124,.9)';
+        ctx.beginPath(); ctx.arc(X(p), Y(p), r * 0.62, 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.fillStyle = b.b[p] === BLACK ? '#fff' : mark && !YI.numbers ? '#1565c0' : '#3b2a14';
+      if (YI.numbers) ctx.font = `${Math.round(cell * 0.28)}px -apple-system, sans-serif`;
+      ctx.fillText(label, X(p), Y(p) + 1);
+    }
+    const fb = YI.fb[e.id];
+    if (fb && fb.correct && e.type === 'point') {
+      ctx.strokeStyle = '#2e7d32';
+      ctx.lineWidth = Math.max(2, r * 0.18);
+      for (const i of e.answers) { const p = b.pt(i % n0, Math.floor(i / n0)); ctx.beginPath(); ctx.arc(X(p), Y(p), r, 0, Math.PI * 2); ctx.stroke(); }
     }
   }
 
@@ -864,21 +1393,33 @@ function toPoint(e) {
 
 function onBoardTap(p) {
   if (Q.pick && p !== NONE) { askPicked(p); return; }
-  if (S.mode === 'study') { studyTap(p); return; }
-  if (p === NONE || S.view !== null) return;
+  if (S.mode === 'study') { if (sg().kind === 'yi') yiTap(p); else studyTap(p); return; }
+  if (S.mode === 'practice') { practiceTap(p); return; }
+  if (p === NONE) return;
+  if (S.view !== null) { reviewTry(p); return; }
   if (S.scoring) {
     if (S.scoring.toggle(p)) render();
     return;
   }
   if (!canHumanMove()) return;
-  if (!S.board.isLegal(p, S.game.human)) {
-    if (S.board.b[p] === EMPTY) toast(p === S.board.ko ? '打劫：需要先在别处走一手，才能提回' : '这里不能落子（禁着点）');
+  const b = S.board, me = S.game.human;
+  if (!b.isLegal(p, me)) {
+    if (b.b[p] === EMPTY) toast(p === b.ko ? '打劫：需要先在别处走一手，才能提回' : '这里不能落子（禁着点）');
     return;
   }
-  if (S.prefs.confirm && S.pendingTap !== p) {
-    S.pendingTap = p;
-    drawBoard();
-    return;
+  if (S.pendingTap !== p) {
+    // 新手辅助：这手会让自己被叫吃时先提醒
+    if (S.prefs.helper && b.isSelfAtari(p, me)) {
+      S.pendingTap = p;
+      toast('注意：下在这里，你的棋只剩一口气，可能被提掉。确定要下就再点一次。');
+      drawBoard();
+      return;
+    }
+    if (S.prefs.confirm) {
+      S.pendingTap = p;
+      drawBoard();
+      return;
+    }
   }
   playMove(p);
 }
@@ -912,22 +1453,24 @@ function humanWr() {
 }
 
 function statusText() {
-  if (S.view !== null) return `复盘：第 ${S.view + 1} 手`;
+  if (S.view !== null) return '回看中（对局不会被改变）';
   if (S.scoringBusy) return '正在数子…';
   if (S.scoring) return '终局 · 点棋子可切换死活\n' + scoreText();
   if (S.result) return S.result.text;
   const g = S.game, b = S.board;
-  const info = `${g.size}路 · 第 ${b.moveCount} 手 · 提子 黑${b.capB} 白${b.capW}`;
+  const info = captureRule()
+    ? `吃子棋 · 先吃到 ${g.captureN} 子获胜 · 你吃了 ${g.human === BLACK ? b.capB : b.capW}，AI 吃了 ${g.human === BLACK ? b.capW : b.capB}`
+    : `${g.size}路 · 第 ${b.moveCount} 手 · 提子 黑${b.capB} 白${b.capW}`;
   let s;
-  if (b.toPlay !== g.human) s = `AI（${S.prefs.target < 100 ? '让棋' : LEVELS[S.prefs.level].name}）思考中…`;
+  if (b.toPlay !== g.human) s = `AI（${captureRule() ? '吃子棋' : S.prefs.target < 100 ? '让棋' : LEVELS[S.prefs.level].name}）思考中…`;
   else {
     s = `轮到你（执${colorName(g.human)}）`;
     if (b.lastMove === PASS && b.moveCount > 0) s += ' · AI 停了一手';
   }
   s += `　${info}`;
-  if (S.prefs.own) {
+  if (S.prefs.own && !captureRule()) {
     const la = latestAnalysis(S.analyses, S.history.length);
-    if (la) s += `\n形势判断：${la.a.score > 0 ? '黑' : '白'}领先约 ${Math.abs(la.a.score).toFixed(1)} 子`;
+    if (la) s += `\n形势判断：${la.a.score > 0 ? '黑' : '白'}领先约 ${Math.abs(la.a.score).toFixed(1)}`;
   }
   return s;
 }
@@ -939,6 +1482,10 @@ function reasonsHtml(list) {
 
 function commentHtml(c) {
   const num = `第 ${c.j + 1} 手`;
+  if (c.simple) {
+    return `<div class="cm ${c.you ? 'good' : 'ai'}${S.view === c.j ? ' viewing' : ''}" data-j="${c.j}">
+      <div class="h"><b>${num}</b> ${c.you ? '你' : 'AI'}下 ${esc(c.name)}</div>${reasonsHtml(c.reasons)}</div>`;
+  }
   if (c.you) {
     let h = `<div class="cm ${c.q.cls}${S.view === c.j ? ' viewing' : ''}" data-j="${c.j}">
       <div class="h"><b>${num}</b> 你下 ${esc(c.name)} <span class="tag ${c.q.cls}">${c.q.label}</span>
@@ -946,6 +1493,7 @@ function commentHtml(c) {
     if (c.best) {
       h += `<div class="better">更好的是 <b>${esc(c.best.name)}</b>（胜率约 ${pct(c.best.wr)}）${reasonsHtml(c.best.reasons)}</div>`;
     }
+    if (c.q.cls === 'slow' || c.q.cls === 'bad') h += '<p class="note">点这条点评，可以回看当时的局面并试下。</p>';
     return h + '</div>';
   }
   const yourWr = c.wrNext !== undefined ? c.wrNext : 1 - c.wrAfter;
@@ -954,22 +1502,45 @@ function commentHtml(c) {
     <span class="wr">你的胜率 ${pct(yourWr)}</span></div>${reasonsHtml(c.reasons)}</div>`;
 }
 
+function reviewHtml() {
+  const j = S.view, b = boardAt(j), m = S.history[j], c = b.toPlay;
+  let h = `<div class="cm hint"><div class="h"><b>回看：第 ${j + 1} 手之前</b></div>
+    <p>实战${c === S.game.human ? '你' : ' AI '}下在 <b>${esc(b.name(m))}</b>（红圈）。${captureRule() ? '' : '彩色圆圈是 AI 推荐的点，数字是走那里之后的胜率。'}</p>
+    <p class="note">在棋盘上点一下就是“试下”，可以连续试几手（黑白轮流），真正的对局不会被改变。看完点“回到当前”继续下。</p>`;
+  const tn = S.tryNote;
+  if (tn) {
+    h += '<div class="better">';
+    if (!tn.q) h += `<p>试下 ${esc(tn.name)}：${esc(tn.text)}</p>`;
+    else {
+      h += `<p>试下 <b>${esc(tn.name)}</b>：<span class="tag ${tn.q.cls}">${tn.q.label}</span> 走这里之后的胜率约 ${pct(tn.wr)}${tn.best ? `（AI 推荐 ${esc(tn.best.name)} 约 ${pct(tn.best.wr)}）` : ''}</p>${reasonsHtml(tn.reasons)}`;
+    }
+    h += '</div>';
+  }
+  const cm = S.comments[j];
+  return h + '</div>' + (cm ? commentHtml(cm) : '');
+}
+
 function playCoachHtml() {
+  if (S.view !== null) return reviewHtml();
   let html = '';
   if (S.hint) {
     if (S.hint.loading) html += '<div class="cm hint"><b>提示</b> 正在计算…</div>';
     else {
       html += `<div class="cm hint"><div class="h"><b>提示</b> 推荐 <b>${esc(S.hint.name)}</b>
-        <span class="wr">胜率约 ${pct(S.hint.wr)}</span></div>${reasonsHtml(S.hint.reasons)}
+        ${S.hint.wr !== null ? `<span class="wr">胜率约 ${pct(S.hint.wr)}</span>` : ''}</div>${reasonsHtml(S.hint.reasons)}
         ${S.hint.others.length ? `<div class="note">其他候选：${S.hint.others.map(o => `${esc(o.name)}（${pct(o.wr)}）`).join('，')}；棋盘上的数字是走那里之后你的胜率。</div>` : ''}</div>`;
     }
+  }
+  if (captureRule() && !S.history.length) {
+    html += `<div class="cm game"><b>吃子棋</b><p>规则：谁先吃到 ${S.game.captureN} 个子谁赢，不用管地盘。</p>
+      <p>要点：1）数一数双方的气，只剩一口气的子（红圈）马上就会被吃；2）自己被叫吃时往外长，能长出 3 口气就安全；3）叫吃对方时，把它往你自己的棋子那边赶。</p></div>`;
   }
   if (!S.prefs.coach) {
     return html + '<div class="empty">讲解已关闭。勾选“讲解”就能看到每步棋的点评。</div>';
   }
   const keys = Object.keys(S.comments).map(Number).sort((a, b) => b - a);
-  if (!keys.length) {
-    html += '<div class="empty">下棋后，这里会逐手点评：这步棋好不好、为什么，以及更好的下法。<br>点一条点评可以回看当时的局面。<br>想学名局，点上方的“棋谱”。</div>';
+  if (!keys.length && !captureRule()) {
+    html += '<div class="empty">下棋后，这里会逐手点评：这步棋好不好、为什么，以及更好的下法。<br>点一条点评，或者点“回看”，可以回到前面的局面想一想、试下几手。</div>';
   }
   for (const j of keys) html += commentHtml(S.comments[j]);
   return html;
@@ -977,49 +1548,90 @@ function playCoachHtml() {
 
 function studyCoachHtml() {
   const g = sg(), mv = gameMoves(g), n = mv.length, i = T.idx;
-  const keysHtml = '<div class="keys">' + Object.keys(g.notes).map(Number).map(k =>
-    `<button data-go="${k}"${k === i ? ' class="on"' : ''}>第 ${k} 手</button>`).join('') + '</div>';
   const lesson = g.kind === 'lesson';
+  const keysHtml = '<div class="keys">' + Object.keys(g.notes).map(Number).filter(k => k <= n).map(k =>
+    `<button data-go="${k}"${k === i ? ' class="on"' : ''}>第 ${k} 手</button>`).join('') + '</div>';
+  const nextLesson = lesson && i === n ? GAMES.findIndex((x, k) => k > T.gi && x.kind === 'lesson') : -1;
   const info = `<div class="cm game"><div class="h"><b>${esc(g.title)}</b>
-    <span class="wr">${lesson ? '套路讲解' : `${g.year} 年 · ${esc(g.result)}`}</span></div>
+    <span class="wr">${lesson ? esc(g.chapter) : `${g.year} 年 · ${esc(g.result)}`}</span></div>
     ${lesson ? '' : `<div>黑：${esc(g.black)}　白：${esc(g.white)}</div>`}
     ${i === 0 ? `<p>${esc(g.intro)}</p><p class="note">点“下一手”一步步看，每一手都有讲解；打开“猜棋”先自己想下一手再揭晓，是提高棋力最有效的练习。</p>` : ''}
     ${lesson && (i === 0 || i === n) ? `<div class="key">${esc(g.use)}</div>` : ''}
-    <div class="note">${lesson ? '每一步：' : '重点手：'}</div>${keysHtml}</div>`;
+    ${nextLesson >= 0 ? `<p><button class="small primary" data-lesson="${nextLesson}">下一课：${esc(GAMES[nextLesson].title)}</button></p>` : ''}
+    ${g.kind === 'mine' ? '<p class="keys"><button data-rec="export">导出全部对局记录</button><button data-rec="import">导入对局记录</button></p><p class="note">共保存了 ' + RECORDS.length + ' 盘对局。导出的文件可以存到云盘或发到别的设备，再导入合并。</p>' : ''}
+    ${Object.keys(g.notes).length ? `<div class="note">${lesson ? '每一步：' : '重点手：'}</div>${keysHtml}` : ''}</div>`;
   if (i === 0) return info;
   const b = studyBoardAt(i - 1), m = mv[i - 1], c = b.toPlay;
   const cm = T.comments[i - 1];
   const note = g.notes[i];
   const who = lesson ? colorName(c) : `${colorName(c)}（${esc(c === BLACK ? g.black : g.white)}）`;
-  let h = `<div class="cm${note ? ' best' : ''}"><div class="h"><b>第 ${i} 手</b> ${who}下 ${esc(b.name(m))}
-    ${cm ? `<span class="wr">黑胜率约 ${pct(cm.blackWr)}</span>` : ''}</div>`;
+  let h = `<div class="cm${note ? ' best' : ''}"><div class="h"><b>第 ${i} 手</b> ${who}${m === PASS ? '停一手' : '下 ' + esc(b.name(m))}
+    ${cm && !lesson ? `<span class="wr">黑胜率约 ${pct(cm.blackWr)}</span>` : ''}</div>`;
   if (note) h += `<div class="key"><b>讲解：</b>${esc(note)}</div>`;
   if (T.lastGuess && T.lastGuess.at === i) {
     h += T.lastGuess.ok
       ? '<p>你猜中了这一手！</p>'
       : `<p>你猜的是 ${esc(T.lastGuess.guess)}（棋盘上的蓝色叉号），实战下在 ${esc(T.lastGuess.actual)}。对比一下两手棋的区别。</p>`;
   }
-  h += `<div class="note" style="margin-top:6px">AI 讲解：</div>${reasonsHtml(cm && cm.reasons)}`;
-  if (cm && cm.top) {
-    h += cm.top.same
-      ? '<p class="note">这手棋与本机 AI 引擎的首选一致。</p>'
-      : `<p class="note">本机 AI 引擎的首选是 ${esc(cm.top.name)}。引擎棋力远不如这些高手，这里只作对照：想一想高手为什么没有下那里。</p>`;
+  if (m !== PASS && (!lesson || !note)) {
+    h += `<div class="note" style="margin-top:6px">AI 讲解：</div>${reasonsHtml(cm && cm.reasons)}`;
+    if (cm && cm.top && !lesson) {
+      h += cm.top.same
+        ? '<p class="note">这手棋与本机 AI 引擎的首选一致。</p>'
+        : g.kind === 'mine'
+          ? `<p class="note">AI 推荐的是 ${esc(cm.top.name)}。</p>`
+          : `<p class="note">本机 AI 引擎的首选是 ${esc(cm.top.name)}。引擎棋力远不如这些高手，这里只作对照：想一想高手为什么没有下那里。</p>`;
+    }
   }
   if (i === n && !lesson) h += `<p><b>终局：${esc(g.result)}</b></p>`;
   return h + '</div>' + info;
 }
 
-function render() {
-  const study = S.mode === 'study';
-  $('tabPlay').classList.toggle('on', !study);
-  $('tabStudy').classList.toggle('on', study);
-  $('playBar').hidden = study;
-  $('studyBar').hidden = !study;
+function practiceCoachHtml() {
+  const q = pb();
+  if (!q) return '<div class="empty">没有练习题。</div>';
+  const doneN = PROBLEMS.filter(x => S.done.problems[x.id]).length;
+  let h = `<div class="cm ${P.phase === 'right' ? 'right' : P.phase === 'wrong' ? 'wrong' : 'game'}">
+    <div class="h"><b>${esc(LEVEL_NAMES[q.level])} · ${esc(q.title)}</b><span class="wr">第 ${P.i + 1} / ${PROBLEMS.length} 题 · 已完成 ${doneN}</span></div>
+    <p class="prompt">${esc(q.prompt)}</p>`;
+  if (P.phase === 'ask') h += '<p class="note">在棋盘上点你的答案（黑先）。</p>';
+  if (P.showTip || P.phase === 'shown') h += `<div class="key">提示：${esc(q.tip)}</div>`;
+  if (P.phase === 'right') h += `<p><b>正确！</b>${esc(q.explain)}</p><p class="note">棋盘上正在演示完整的变化。点“下一题”继续。</p>`;
+  if (P.phase === 'wrong') h += `<p><b>${esc(P.msg)}</b></p>`;
+  if (P.phase === 'shown') h += `<p><b>答案：</b>${esc(q.explain)}</p><p class="note">点“重做”自己再做一遍。</p>`;
+  return h + '</div>';
+}
 
-  if (study) {
+function render() {
+  const mode = S.mode;
+  $('tabPlay').classList.toggle('on', mode === 'play');
+  $('tabStudy').classList.toggle('on', mode === 'study');
+  $('tabPractice').classList.toggle('on', mode === 'practice');
+  $('playBar').hidden = mode !== 'play' || S.view !== null;
+  $('reviewBar').hidden = mode !== 'play' || S.view === null;
+  $('studyBar').hidden = mode !== 'study';
+  $('practiceBar').hidden = mode !== 'practice';
+
+  if (mode === 'study' && sg().kind === 'yi') {
+    const g = sg();
+    $('wrText').textContent = '';
+    const doneN = GAMES.filter(x => x.kind === 'yi' && S.done.lessons[x.id]).length;
+    $('status').textContent = `《弈》第 ${g.num} / 54 课 · 已学 ${doneN} 课`;
+    $('selGame').value = String(T.gi);
+    for (const id of ['btnFirst', 'btnPrev', 'btnNext', 'btnLast', 'btnAuto', 'btnGuess', 'rngMove', 'btnAsk2']) $(id).hidden = true;
+    $('btnLsPrev').hidden = $('btnLsNext').hidden = false;
+    $('btnLsPrev').disabled = T.gi === 0 || GAMES[T.gi - 1].kind !== 'yi';
+    $('btnLsNext').disabled = !GAMES[T.gi + 1];
+    $('coach').innerHTML = yiCoachHtml();
+  } else if (mode === 'study') {
+    for (const id of ['btnFirst', 'btnPrev', 'btnNext', 'btnLast', 'btnAuto', 'btnGuess', 'rngMove', 'btnAsk2']) $(id).hidden = false;
+    const lessonKind = sg().kind === 'lesson';
+    $('btnLsPrev').hidden = $('btnLsNext').hidden = !lessonKind;
+    $('btnLsPrev').disabled = T.gi === 0;
+    $('btnLsNext').disabled = !GAMES[T.gi + 1] || GAMES[T.gi + 1].kind !== 'lesson';
     const g = sg(), n = gameMoves(g).length;
     const la = latestAnalysis(T.analyses, T.idx);
-    $('wrText').textContent = la ? `黑 ${pct(la.a.toPlay === BLACK ? la.a.wr : 1 - la.a.wr)}` : '';
+    $('wrText').textContent = la && g.kind !== 'lesson' ? `黑 ${pct(la.a.toPlay === BLACK ? la.a.wr : 1 - la.a.wr)}` : '';
     let st = `${g.title}　第 ${T.idx} / ${n} 手`;
     if (T.idx < n) st += ` · 下一手：${colorName(studyBoardAt(T.idx).toPlay)}`;
     if (T.guess) st += ` · 猜棋 ${T.hit}/${T.tried}`;
@@ -1033,22 +1645,40 @@ function render() {
     $('btnAuto').textContent = T.auto ? '暂停' : '自动播放';
     $('btnGuess').classList.toggle('on', T.guess);
     $('coach').innerHTML = studyCoachHtml();
-    $('viewBanner').hidden = true;
+  } else if (mode === 'practice') {
+    $('wrText').textContent = '';
+    $('status').textContent = '练习：黑先';
+    $('selProblem').value = String(P.i);
+    $('btnPbPrev').disabled = P.i === 0;
+    $('btnPbNext').disabled = P.i >= PROBLEMS.length - 1;
+    $('coach').innerHTML = practiceCoachHtml();
   } else {
-    const hw = humanWr();
-    $('wrText').textContent = hw === null ? '' : `你 ${pct(hw)}`;
+    if (captureRule()) {
+      const b = S.board, me = S.game.human;
+      $('wrText').textContent = `吃子 ${me === BLACK ? b.capB : b.capW} : ${me === BLACK ? b.capW : b.capB}`;
+    } else {
+      const hw = humanWr();
+      $('wrText').textContent = hw === null ? '' : `你 ${pct(hw)}`;
+    }
     $('status').textContent = statusText();
     const my = canHumanMove();
     $('btnUndo').disabled = !S.history.length;
     $('btnPass').disabled = !my;
     $('btnHint').disabled = !my;
-    $('btnResign').disabled = $('btnResign2').disabled = !!(S.result || S.scoring);
+    $('btnOwn').disabled = captureRule();
+    $('btnReview').disabled = !S.history.length;
+    $('btnResign').disabled = !!(S.result || S.scoring);
     $('btnOwn').classList.toggle('on', S.prefs.own);
-    for (const [a, b, key] of [['chkCoach', 'chkCoach2', 'coach'], ['chkCands', 'chkCands2', 'cands'], ['chkConfirm', 'chkConfirm2', 'confirm']]) {
-      $(a).checked = $(b).checked = S.prefs[key];
+    $('chkCoach').checked = S.prefs.coach;
+    $('chkCands').checked = S.prefs.cands;
+    $('chkConfirm').checked = S.prefs.confirm;
+    $('chkHelper').checked = S.prefs.helper;
+    if (S.view !== null) {
+      $('reviewText').textContent = `回看第 ${S.view + 1} 手之前${S.tries.length ? ` · 已试下 ${S.tries.length} 手` : ''}`;
+      $('btnRvPrev').disabled = S.view === 0;
+      $('btnRvNext').disabled = S.view >= S.history.length - 1;
+      $('btnRvClear').disabled = !S.tries.length;
     }
-    $('viewBanner').hidden = S.view === null;
-    if (S.view !== null) $('viewText').textContent = `第 ${S.view + 1} 手之前 · 红圈=实战 · 数字=AI 推荐（胜率%）`;
     $('coach').innerHTML = playCoachHtml();
   }
   drawBoard();
@@ -1056,14 +1686,14 @@ function render() {
 
 // ---------------- 提问 ----------------
 
-/** 当前局面及其分析：对战里以“你”为视角，棋谱里以轮到下棋的一方为视角。 */
+/** 当前局面及其分析：对战里以“你”为视角，学习里以轮到下棋的一方为视角。 */
 function askContext() {
   if (S.mode === 'study') {
     const b = studyBoardAt(T.idx);
-    return { b, getA: () => getStudyAnalysis(T.idx), me: b.toPlay, meName: colorName(b.toPlay), opName: colorName(3 - b.toPlay), komi: sg().komi || 0, budget: STUDY_BUDGET };
+    return { b, getA: () => getStudyAnalysis(T.idx), me: b.toPlay, meName: colorName(b.toPlay), komi: sg().komi || 0, budget: STUDY_BUDGET };
   }
   const k = S.history.length;
-  return { b: S.board.copy(), getA: () => getAnalysis(k), me: S.game.human, meName: '你', opName: 'AI', komi: S.game.komi, budget: BUDGET[S.game.size] };
+  return { b: S.board.copy(), getA: () => getAnalysis(k), me: S.game.human, meName: '你', komi: S.game.komi, budget: BUDGET[S.game.size] };
 }
 
 function askShow(q, html) {
@@ -1086,7 +1716,6 @@ function syncAskChips() {
   for (const el of document.querySelectorAll('[data-ask]')) el.classList.toggle('on', Q.pick === el.dataset.ask);
 }
 
-/** 执行一个提问；返回 false 表示需要先在棋盘上点选。 */
 async function ask(kind, label) {
   const seq = ++Q.seq, ctx0 = askContext(), b = ctx0.b;
   const alive = () => seq === Q.seq;
@@ -1097,6 +1726,10 @@ async function ask(kind, label) {
     askShow(label, `<p>请在棋盘上点${kind === 'point' ? '一个空点' : '一块棋的任意一个棋子'}。</p>`);
     return;
   }
+  if (S.mode === 'play' && captureRule() && kind !== 'weak') {
+    askShow(label, '<p>吃子棋只比谁先吃到子。可以问“哪块棋最危险？”，或者点“提示”。</p>');
+    return;
+  }
   askShow(label, '<p>正在分析…</p>');
   const a = await ctx0.getA();
   if (!alive()) return;
@@ -1104,7 +1737,7 @@ async function ask(kind, label) {
   const meWr = a.toPlay === ctx0.me ? a.wr : 1 - a.wr;
   if (kind === 'lead') {
     const sc = a.score;
-    const lead = Math.abs(sc) < 1 ? '双方非常接近' : `${sc > 0 ? '黑' : '白'}领先约 ${Math.abs(sc).toFixed(1)} 子`;
+    const lead = Math.abs(sc) < 1 ? '双方非常接近' : `${sc > 0 ? '黑' : '白'}领先约 ${Math.abs(sc).toFixed(1)}`;
     const feel = meWr > 0.7 ? '形势明显有利，稳健地下，不要冒险。' : meWr > 0.55 ? '稍微领先，注意补强自己的弱棋。'
       : meWr > 0.45 ? '难解难分，下一两手很关键。' : meWr > 0.3 ? '稍微落后，需要找机会主动出击。' : '形势落后较多，要在对方的薄弱处寻找战斗机会。';
     askShow(label, `<p>形势判断：${lead}（已计入贴目 ${ctx0.komi}）。</p><p>${esc(ctx0.meName)}的胜率约 ${pct(meWr)}：${feel}</p><p class="note">想看双方地盘的分布，可以打开“形势”。</p>`);
@@ -1132,11 +1765,10 @@ async function ask(kind, label) {
       const g = b.group(p);
       g.stones.forEach(q => seen.add(q));
       const s = g.stones.reduce((t, q) => t + a.own[q] * sgn, 0) / g.stones.length;
-      // 越危险、越大的棋越值得关心；已经基本死掉的小棋子不算
-      const score = s - Math.min(g.stones.length, 8) * 0.02;
+      const score = s - Math.min(g.stones.length, 8) * 0.02 - (g.libs === 1 ? 1 : 0);
       if (s > -0.6 && (!worst || score < worst.score)) worst = { g, s, score };
     }
-    if (!worst || worst.s > 0.6) { askShow(label, `<p>${esc(ctx0.meName)}的棋目前都比较安全，可以放心去抢大场或攻击对方。</p>`); return; }
+    if (!worst || (worst.s > 0.6 && worst.g.libs > 1)) { askShow(label, `<p>${esc(ctx0.meName)}的棋目前都比较安全，可以放心去抢大场或攻击对方。</p>`); return; }
     Q.mark = worst.g.stones;
     drawBoard();
     askShow(label, `<p>${esc(ctx0.meName)}在 <b>${esc(b.name(worst.g.stones[0]))}</b> 一带的 ${worst.g.stones.length} 个子最危险（已用蓝圈标出），${groupState(worst.s, worst.g.libs)}</p>
@@ -1183,7 +1815,6 @@ async function askPicked(p) {
       <p class="note">判断依据：从当前局面模拟几百盘，这些棋子最后留在棋盘上的比例。</p>`);
     return;
   }
-  // point：下在这里怎么样
   const label = `下在 ${b.name(p)} 怎么样？`;
   const c = b.toPlay;
   if (b.b[p] !== EMPTY) { askShow(label, '<p>这里已经有棋子了。请点一个空点。</p>'); Q.pick = 'point'; syncAskChips(); return; }
@@ -1210,7 +1841,6 @@ async function askPicked(p) {
     <p class="note">这只是试下，棋盘没有变化。</p>`);
 }
 
-/** 文字提问：先识别局面类问题，否则在知识库里按关键词找答案。 */
 function askText(text) {
   const t = text.trim();
   if (!t) return;
@@ -1265,7 +1895,7 @@ function toast(msg) {
   t.textContent = msg;
   t.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { t.hidden = true; }, 2200);
+  toastTimer = setTimeout(() => { t.hidden = true; }, 2600);
 }
 
 function showMessage(title, text, withNewGame, buttons) {
@@ -1275,7 +1905,7 @@ function showMessage(title, text, withNewGame, buttons) {
   const menu = $('msgMenu');
   menu.innerHTML = '';
   const btns = buttons || (withNewGame
-    ? [{ label: '查看棋盘' }, { label: '再来一局', primary: true, fn: openNewGame }]
+    ? [{ label: '回看这盘棋', fn: () => enterReview() }, { label: '再来一局', primary: true, fn: openNewGame }]
     : [{ label: '好', primary: true }]);
   for (const bt of btns) {
     const el = document.createElement('button');
@@ -1305,6 +1935,8 @@ function showTarget() {
 }
 
 function openNewGame() {
+  if (S.mode !== 'play') setMode('play');
+  fNew.rule.value = captureRule() ? `capture${S.game.captureN}` : 'normal';
   fNew.size.value = String(S.game.size);
   fNew.human.value = String(S.game.human);
   fillHandicap(S.game.size, S.game.handicap);
@@ -1332,58 +1964,127 @@ dlgNew.addEventListener('close', () => {
     toast('AI 设置已更新，从下一手开始生效');
     return;
   }
-  const handicap = +fNew.handicap.value, auto = fNew.komi.value === 'auto';
+  const rule = fNew.rule.value;
+  const handicap = rule === 'normal' ? +fNew.handicap.value : 0, auto = fNew.komi.value === 'auto';
   newGame({
+    rule: rule === 'normal' ? 'normal' : 'capture',
+    captureN: rule === 'normal' ? 1 : +rule.slice(7),
     size: +fNew.size.value, human: +fNew.human.value, handicap,
     komi: auto ? (handicap >= 2 ? 0.5 : 7.5) : +fNew.komi.value,
     komiAuto: auto,
   });
 });
 
-$('dlgMore').addEventListener('close', () => {
-  if ($('dlgMore').returnValue === 'resign') resign();
+$('dlgWelcome').addEventListener('close', () => {
+  const rv = $('dlgWelcome').returnValue;
+  if (rv === 'learn') { setMode('study'); selectGame(0); }
+  else if (rv === 'practice') { setMode('practice'); practiceGo(0); }
+  else setMode('play');
 });
+
+// ---------------- 下拉列表 ----------------
+
+function fillGameSelect() {
+  // 我的对局放在列表最后（每次重建，最新的在前）
+  while (GAMES.length && GAMES[GAMES.length - 1].kind === 'mine') GAMES.pop();
+  for (const r of RECORDS) GAMES.push(recordToGame(r));
+  if (T.gi >= GAMES.length) T.gi = 0;
+  const groups = [];
+  GAMES.forEach((g, i) => {
+    const label = g.kind === 'yi' ? `《弈》第 ${g.stage} 阶段 · ${g.stageTitle}` : g.kind === 'lesson' ? `动画演示课 · ${g.chapter}` : g.group;
+    let grp = groups.find(x => x.label === label);
+    if (!grp) groups.push(grp = { label, items: [] });
+    const text = g.kind === 'yi'
+      ? `第 ${g.num} 课 ${g.title}${S.done.lessons[g.id] ? '（已学）' : ''}`
+      : g.kind === 'lesson'
+      ? `${g.title}${S.done.lessons[g.id] ? '（已学）' : ''}`
+      : g.kind === 'mine' ? `${g.title}（${gameMoves(g).length} 手）`
+      : `${g.title}（${g.year}${g.result ? '，' + g.result : ''}，${gameMoves(g).length} 手）`;
+    grp.items.push(`<option value="${i}">${esc(text)}</option>`);
+  });
+  $('selGame').innerHTML = groups.map(g => `<optgroup label="${esc(g.label)}">${g.items.join('')}</optgroup>`).join('');
+  $('selGame').value = String(T.gi);
+}
+
+function fillProblemSelect() {
+  const byLevel = {};
+  PROBLEMS.forEach((q, i) => {
+    (byLevel[q.level] = byLevel[q.level] || []).push(`<option value="${i}">${i + 1}. ${esc(q.title)}${S.done.problems[q.id] ? '（已完成）' : ''}</option>`);
+  });
+  $('selProblem').innerHTML = Object.keys(byLevel).map(l => `<optgroup label="${esc(LEVEL_NAMES[l])}">${byLevel[l].join('')}</optgroup>`).join('');
+  $('selProblem').value = String(P.i);
+}
 
 // ---------------- 绑定 ----------------
 
 $('tabPlay').addEventListener('click', () => setMode('play'));
 $('tabStudy').addEventListener('click', () => setMode('study'));
+$('tabPractice').addEventListener('click', () => setMode('practice'));
 $('btnNew').addEventListener('click', openNewGame);
 $('btnUndo').addEventListener('click', undo);
 $('btnPass').addEventListener('click', humanPass);
 $('btnHint').addEventListener('click', showHint);
 $('btnResign').addEventListener('click', resign);
-$('btnMore').addEventListener('click', () => { $('dlgMore').returnValue = ''; $('dlgMore').showModal(); });
 $('btnOwn').addEventListener('click', () => { S.prefs.own = !S.prefs.own; save(); render(); });
-$('btnBackLive').addEventListener('click', () => { S.view = null; render(); });
+$('btnReview').addEventListener('click', () => enterReview());
+$('btnRvPrev').addEventListener('click', () => reviewStep(-1));
+$('btnRvNext').addEventListener('click', () => reviewStep(1));
+$('btnRvClear').addEventListener('click', () => { S.tries = []; S.tryNote = null; render(); });
+$('btnRvBack').addEventListener('click', () => { exitReview(); render(); advance(); });
+$('btnHelp').addEventListener('click', () => $('dlgHelp').showModal());
 
-function bindPref(ids, key, after) {
-  for (const id of ids) {
-    $(id).addEventListener('change', e => {
-      S.prefs[key] = e.target.checked;
-      if (after) after();
-      save();
-      render();
-    });
-  }
+function bindPref(id, key, after) {
+  $(id).addEventListener('change', e => {
+    S.prefs[key] = e.target.checked;
+    if (after) after();
+    save();
+    render();
+  });
 }
-bindPref(['chkCoach', 'chkCoach2'], 'coach', () => {
-  if (S.prefs.coach) S.analyses.forEach((a, k) => a && makeComment(k));
+bindPref('chkCoach', 'coach', () => {
+  if (S.prefs.coach && !captureRule()) S.analyses.forEach((a, k) => a && makeComment(k));
 });
-bindPref(['chkCands', 'chkCands2'], 'cands');
-bindPref(['chkConfirm', 'chkConfirm2'], 'confirm', () => { S.pendingTap = NONE; });
+bindPref('chkCands', 'cands');
+bindPref('chkConfirm', 'confirm', () => { S.pendingTap = NONE; });
+bindPref('chkHelper', 'helper', () => { S.pendingTap = NONE; });
 
 $('coach').addEventListener('click', e => {
+  const opt = e.target.closest('[data-opt]');
+  if (opt) { yiAnswer(+opt.dataset.opt === yiEx().correct); return; }
+  const yb = e.target.closest('[data-yi]');
+  if (yb) {
+    const a = yb.dataset.yi;
+    if (a === 'prev') yiSelect(YI.ex - 1);
+    else if (a === 'next') yiSelect(YI.ex + 1);
+    else if (a === 'reset') { YI.pos = 0; delete YI.fb[yiEx().id]; yiSetBoard(); }
+    else if (a === 'numbers') YI.numbers = !YI.numbers;
+    render();
+    return;
+  }
   const go = e.target.closest('[data-go]');
   if (go) { stopAuto(); studyGo(+go.dataset.go); return; }
+  const rec = e.target.closest('[data-rec]');
+  if (rec) { if (rec.dataset.rec === 'export') exportRecords(); else $('fileImport').click(); return; }
+  const les = e.target.closest('[data-lesson]');
+  if (les) { selectGame(+les.dataset.lesson); return; }
   const el = e.target.closest('[data-j]');
-  if (el) openReview(+el.dataset.j);
+  if (el && S.mode === 'play') {
+    const j = +el.dataset.j;
+    if (S.view === j) { exitReview(); render(); } else enterReview(j);
+  }
 });
 
-$('selGame').innerHTML =
-  `<optgroup label="套路讲解（入门必学）">${GAMES.map((g, i) => g.kind === 'lesson' ? `<option value="${i}">${esc(g.title)}</option>` : '').join('')}</optgroup>` +
-  `<optgroup label="经典名局">${GAMES.map((g, i) => g.kind !== 'lesson' ? `<option value="${i}">${esc(g.title)}（${g.year}，${esc(g.black)} vs ${esc(g.white)}）</option>` : '').join('')}</optgroup>`;
 $('selGame').addEventListener('change', e => selectGame(+e.target.value));
+$('btnLsPrev').addEventListener('click', () => { if (T.gi > 0) selectGame(T.gi - 1); });
+$('btnLsNext').addEventListener('click', () => { if (GAMES[T.gi + 1]) selectGame(T.gi + 1); });
+$('coach').addEventListener('submit', e => {
+  if (!e.target.matches('[data-num]')) return;
+  e.preventDefault();
+  const v = $('yiNum').value.trim();
+  YI.input = v;
+  if (v === '') return;
+  yiAnswer(yiEx().answers.map(Number).includes(Number(v)));
+});
 $('btnFirst').addEventListener('click', () => { stopAuto(); studyGo(0); });
 $('btnPrev').addEventListener('click', () => { stopAuto(); studyGo(T.idx - 1); });
 $('btnNext').addEventListener('click', () => studyGo(T.idx + 1));
@@ -1397,10 +2098,22 @@ $('btnGuess').addEventListener('click', () => {
 $('rngMove').addEventListener('input', e => { T.idx = +e.target.value; render(); });
 $('rngMove').addEventListener('change', e => { stopAuto(); studyGo(+e.target.value); });
 
+$('selProblem').addEventListener('change', e => practiceGo(+e.target.value));
+$('btnPbPrev').addEventListener('click', () => practiceGo(P.i - 1));
+$('btnPbNext').addEventListener('click', () => practiceGo(P.i + 1));
+$('btnPbRetry').addEventListener('click', practiceStart);
+$('btnPbTip').addEventListener('click', () => { P.showTip = true; render(); });
+$('btnPbAnswer').addEventListener('click', practiceAnswer);
+
 addEventListener('keydown', e => {
-  if (S.mode !== 'study' || document.querySelector('dialog[open]')) return;
-  if (e.key === 'ArrowRight') studyGo(T.idx + 1);
-  else if (e.key === 'ArrowLeft') { stopAuto(); studyGo(T.idx - 1); }
+  if (document.querySelector('dialog[open]') || e.target.tagName === 'INPUT') return;
+  if (S.mode === 'study') {
+    if (e.key === 'ArrowRight') studyGo(T.idx + 1);
+    else if (e.key === 'ArrowLeft') { stopAuto(); studyGo(T.idx - 1); }
+  } else if (S.mode === 'play' && S.view !== null) {
+    if (e.key === 'ArrowRight') reviewStep(1);
+    else if (e.key === 'ArrowLeft') reviewStep(-1);
+  }
 });
 
 let resizeTimer = 0;
@@ -1421,11 +2134,21 @@ if ('serviceWorker' in navigator && !/WeiqiApp/.test(navigator.userAgent) && loc
   }).catch(() => {});
 }
 $('btnReload').addEventListener('click', () => location.reload());
-$('btnHelp').addEventListener('click', () => $('dlgHelp').showModal());
+$('fileImport').addEventListener('change', e => { if (e.target.files[0]) importRecords(e.target.files[0]); e.target.value = ''; });
 
-load();
+// ---------------- 启动 ----------------
+
+loadRecords();
+const firstRun = load();
+fillGameSelect();
+fillProblemSelect();
+if (S.mode === 'practice') practiceStart();
 layout();
 render();
+if (S.mode === 'study' && sg().kind === 'yi') { yiSelect(0); render(); }
 if (S.mode === 'study') studyGo(T.idx);
-else if (!S.result && S.board.passes >= 2) startScoring();
-else advance();
+else if (S.mode === 'play') {
+  if (!S.result && !captureRule() && S.board.passes >= 2) startScoring();
+  else advance();
+}
+if (firstRun) $('dlgWelcome').showModal();
