@@ -2,26 +2,34 @@
 /* 围棋对战教练：对战、学习（课程与名局）、练习、提问。
  * 引擎在 engine.js；蒙特卡洛计算在 Web Worker 里进行，局部死活计算在主线程（很快）。 */
 
-const APP_VERSION = '2.7';
+const APP_VERSION = '3.0';
 const G = window.Go;
 const { EMPTY, BLACK, WHITE, PASS, NONE, RESIGN } = G;
 const GAMES = window.GAMES || [];
 const PROBLEMS = window.PROBLEMS || [];
 
+// kind：mcts = 传统蒙特卡洛引擎；policy = 神经网络的第一感（不计算）；nn = 神经网络 + 搜索。
+// 神经网络不可用时，policy / nn 难度改用 playouts / ms 指定的传统引擎。
 const LEVELS = [
-  { name: '入门', playouts: 300, ms: 1000, random: true },
-  { name: '初级', playouts: 1500, ms: 2000 },
-  { name: '中级', playouts: 6000, ms: 4000 },
-  { name: '高级', playouts: 20000, ms: 8000 },
-  { name: '大师', playouts: 60000, ms: 15000 },
+  { name: '入门', kind: 'mcts', playouts: 300, ms: 1000, random: true, note: '适合新手' },
+  { name: '初级', kind: 'mcts', playouts: 1500, ms: 2000 },
+  { name: '中级', kind: 'policy', temp: 1, playouts: 6000, ms: 4000, note: '凭棋感，偶尔随意' },
+  { name: '高级', kind: 'policy', greedy: true, playouts: 20000, ms: 8000, note: '神经网络第一感' },
+  { name: '业余高段', kind: 'nn', visits: 0, playouts: 60000, ms: 15000, note: '神经网络 + 计算' },
+  { name: '职业水平', kind: 'nn', visits: 1600, nnMs: 12000, playouts: 60000, ms: 15000, note: '思考较久' },
 ];
-// 每个局面的分析量（用于讲解、胜率、形势判断）
+// 每个局面的分析量（用于讲解、胜率、形势判断）。visits 是神经网络搜索的次数，playouts 是传统引擎的模拟次数
 const BUDGET = {
-  9: { playouts: 8000, ms: 2500, own: 400 },
-  13: { playouts: 5000, ms: 3000, own: 300 },
-  19: { playouts: 4000, ms: 3500, own: 240 },
+  9: { playouts: 8000, ms: 2500, own: 400, visits: 200 },
+  13: { playouts: 5000, ms: 3000, own: 300, visits: 120 },
+  19: { playouts: 4000, ms: 3500, own: 240, visits: 80 },
 };
-const STUDY_BUDGET = { playouts: 2500, ms: 2000, own: 200 };
+const STUDY_BUDGET = { playouts: 2500, ms: 2000, own: 200, visits: 60 };
+const ENGINES = {
+  b10: '神经网络（强，推荐）',
+  b6: '神经网络（快，适合旧设备）',
+  mcts: '传统引擎（不用神经网络）',
+};
 const FINAL_OWN = { 9: 1200, 13: 900, 19: 600 };
 const STORE_KEY_BASE = 'weiqi-coach-v1';
 const RECORDS_KEY_BASE = 'weiqi-coach-records';
@@ -64,11 +72,116 @@ const esc = s => String(s).replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;'
 function sgfPt(b, s) {
   return s === 'tt' ? PASS : b.pt(s.charCodeAt(0) - 97, s.charCodeAt(1) - 97);
 }
+/** 坐标名（如 D4）→ 棋盘点；不合法返回 -1 */
+function nameToPt(b, name) {
+  const m = /^([A-HJ-T])(\d{1,2})$/i.exec(String(name).trim());
+  if (!m) return -1;
+  const x = G.LETTERS.indexOf(m[1].toUpperCase()), row = +m[2];
+  if (x < 0 || x >= b.n || row < 1 || row > b.n) return -1;
+  return b.pt(x, b.n - row);
+}
+
 function sgfList(b, s) {
   const r = [];
   for (let k = 0; k < s.length; k += 2) r.push(sgfPt(b, s.slice(k, k + 2)));
   return r;
 }
+
+// ---------------- 神经网络引擎（KataGo 网络，在 nnworker.js 里运行） ----------------
+
+class NNEngine {
+  constructor() {
+    this.worker = null; this.model = ''; this.ready = false; this.failed = ''; this.info = null;
+    this.seq = 0; this.pending = new Map();
+  }
+
+  start(model) {
+    if (model === this.model && (this.worker || this.failed)) return;
+    this.stop();
+    this.model = model;
+    if (model === 'mcts') return;
+    if (typeof WebAssembly === 'undefined') { this.failed = '这个浏览器不支持 WebAssembly'; return; }
+    let w;
+    try { w = new Worker('nnworker.js'); } catch (e) { this.failed = String(e.message || e); return; }
+    this.worker = w;
+    w.onmessage = e => {
+      const m = e.data;
+      if (m.type === 'ready') { this.ready = true; this.info = m; this.changed(); return; }
+      if (m.type === 'error') { this.fail(m.msg); return; }
+      if (m.err) this.fail(m.err);
+      const res = this.pending.get(m.id);
+      if (res) { this.pending.delete(m.id); res(m.res); }
+    };
+    w.onerror = e => { e.preventDefault(); this.fail(e.message || '神经网络加载失败'); };
+    w.postMessage({ type: 'init', model });
+  }
+
+  stop() {
+    if (this.worker) this.worker.terminate();
+    this.worker = null; this.ready = false; this.failed = ''; this.info = null;
+    for (const res of this.pending.values()) res(null);
+    this.pending.clear();
+  }
+
+  fail(msg) {
+    console.error('nn', msg);
+    const model = this.model;
+    this.stop();
+    this.model = model;
+    this.failed = msg;
+    this.changed();
+  }
+
+  changed() { if (typeof render === 'function') render(); if (typeof showEngineStatus === 'function') showEngineStatus(); }
+
+  cancel() {
+    if (!this.worker) return;
+    this.worker.postMessage({ type: 'cancel' });
+    for (const res of this.pending.values()) res(null);
+    this.pending.clear();
+  }
+
+  call(msg) {
+    return new Promise(res => {
+      msg.id = ++this.seq;
+      this.pending.set(msg.id, res);
+      this.worker.postMessage(msg);
+    });
+  }
+
+  /** 搜索：返回候选（访问数、胜率、领先目数）、归属、网络直觉 */
+  async search(board, visits, ms, komi) {
+    const r = await this.call({ type: 'search', state: board.state(), visits, ms, komi });
+    return r && { ...r, nn: true, toPlay: board.toPlay };
+  }
+
+  /** 单次评估：归属（黑 +1）与领先目数（黑为正） */
+  evaluate(board, komi) {
+    return this.call({ type: 'eval', state: board.state(), komi });
+  }
+
+  /** 网络正在加载时先等一等（最多 ms 毫秒），加载好了再分析，避免第一手用传统引擎 */
+  whenReady(ms) {
+    return new Promise(res => {
+      const t0 = Date.now();
+      const tick = () => {
+        if (this.ready || this.failed || !this.worker || Date.now() - t0 > ms) res();
+        else setTimeout(tick, 100);
+      };
+      tick();
+    });
+  }
+
+  status() {
+    if (this.model === 'mcts') return '现在用的是传统引擎。';
+    if (this.failed) return `神经网络不可用（${this.failed}），暂时用传统引擎。`;
+    if (!this.ready) return '正在加载神经网络…（第一次需要下载约 30 MB，之后离线可用）';
+    const i = this.info;
+    return `神经网络已就绪：${this.model === 'b10' ? '10 层 128 通道' : '6 层 96 通道'}的 KataGo 网络，单次计算约 ${i.evalMs} 毫秒${i.threads > 1 ? `，${i.threads} 线程` : ''}。`;
+  }
+}
+
+const nn = new NNEngine();
 
 // ---------------- Worker 池 ----------------
 
@@ -102,6 +215,7 @@ class Pool {
   }
 
   cancel() {
+    nn.cancel();
     for (const w of this.workers) w.terminate();
     for (const res of this.pending.values()) res(null);
     this.spawn();
@@ -139,6 +253,11 @@ class Pool {
   }
 
   async ownership(board, count, komi) {
+    await nn.whenReady(20000);
+    if (nn.ready) {
+      const r = await nn.evaluate(board, komi);
+      if (r || nn.ready) return r && { own: r.own, score: r.score, nn: true };
+    }
     const state = board.state(), k = this.size;
     const per = Math.max(20, Math.ceil(count / k));
     const rs = await Promise.all(Array.from({ length: k }, () =>
@@ -155,6 +274,11 @@ class Pool {
   }
 
   async analyze(board, budget, komi) {
+    await nn.whenReady(20000);
+    if (nn.ready) {
+      const r = await nn.search(board, budget.visits, budget.ms, komi);
+      if (r || nn.ready) return r;
+    }
     const [s, o] = await Promise.all([
       this.search(board, budget.playouts, budget.ms, komi),
       this.ownership(board, budget.own, komi),
@@ -171,7 +295,7 @@ const pool = new Pool();
 const S = {
   mode: 'play',
   game: { size: 9, human: BLACK, handicap: 0, komi: 7.5, rule: 'normal', captureN: 1, opp: 'ai' },
-  prefs: { level: 0, target: 100, coach: true, confirm: false, cands: false, own: false, helper: true, marks: true },
+  prefs: { level: 0, target: 100, engine: 'b10', coach: true, confirm: false, cands: false, own: false, helper: true, marks: true },
   summary: null,
   setup: [],
   history: [],
@@ -356,7 +480,7 @@ function pickTarget(a, target) {
   const top = a.cands[0];
   if (!top) return PASS;
   if (top.wr <= target) return top.move;
-  const minV = Math.max(10, top.visits * 0.03);
+  const minV = Math.max(a.nn ? 2 : 10, top.visits * 0.03);
   let best = top, bd = Infinity;
   for (const c of a.cands) {
     if (c.visits < minV) continue;
@@ -364,6 +488,17 @@ function pickTarget(a, target) {
     if (d < bd) { bd = d; best = c; }
   }
   return best.move;
+}
+
+/** 神经网络“第一感”：greedy 取概率最高的一手；否则按概率（温度 temp）随机挑，只在比较像样的着法里挑 */
+function pickPolicy(a, lv) {
+  const list = (a.policy || []).filter(p => p.prior >= 0.02 || p === a.policy[0]);
+  if (!list.length) return a.cands[0] ? a.cands[0].move : PASS;
+  if (lv.greedy) return list[0].move;
+  const ws = list.map(p => Math.pow(p.prior, 1 / lv.temp)), sum = ws.reduce((s, w) => s + w, 0);
+  let x = Math.random() * sum;
+  for (let i = 0; i < list.length; i++) { x -= ws[i]; if (x <= 0) return list[i].move; }
+  return list[0].move;
 }
 
 function pickRandom(r) {
@@ -391,13 +526,24 @@ async function aiTurn(gen, k) {
     const sc = new G.Scoring(pos, G.guessDead(pos, a.own), S.game.komi);
     if (sc.winner() === ai) move = PASS;
   }
-  if (move === undefined && late && a.playouts >= 300 && a.wr < (target ? 0.03 : 0.06)) move = RESIGN;
+  if (move === undefined && late && a.playouts >= (a.nn ? 30 : 300) && a.wr < (target ? 0.03 : a.nn ? 0.02 : 0.06)) move = RESIGN;
   if (move === undefined && late && settled(pos, a.own)) move = PASS;
+  if (move === undefined && a.nn && a.cands[0] && a.cands[0].move === PASS && pos.moveCount > n) move = PASS;
   if (move === undefined) {
+    const lv = LEVELS[S.prefs.level] || LEVELS[0];
     if (target) {
       move = pickTarget(a, target);
+    } else if (lv.kind !== 'mcts' && a.nn) {
+      if (lv.kind === 'policy') move = pickPolicy(a, lv);
+      else {
+        let r = a;
+        if (lv.visits > a.playouts) {
+          r = await nn.search(pos, lv.visits, lv.nnMs, S.game.komi);
+          if (!r || gen !== S.gen) return;
+        }
+        move = r.cands[0] ? r.cands[0].move : PASS;
+      }
     } else {
-      const lv = LEVELS[S.prefs.level];
       const r = await pool.search(pos, lv.playouts, lv.ms, S.game.komi);
       if (!r || gen !== S.gen) return;
       move = lv.random ? pickRandom(r) : (r.cands[0] ? r.cands[0].move : PASS);
@@ -504,13 +650,15 @@ function scoreText() {
 
 // ---------------- 对战：讲解 ----------------
 
-function quality(delta, isBest) {
-  if (isBest) return { cls: 'best', label: '最佳' };
-  if (delta < 0.03) return { cls: 'good', label: '好棋' };
-  if (delta < 0.08) return { cls: 'ok', label: '可以' };
-  if (delta < 0.15) return { cls: 'slow', label: '缓手' };
-  return { cls: 'bad', label: '恶手' };
+const QUALITY = [{ cls: 'best', label: '最佳' }, { cls: 'good', label: '好棋' }, { cls: 'ok', label: '可以' }, { cls: 'slow', label: '缓手' }, { cls: 'bad', label: '恶手' }];
+/** 按胜率损失评价；有神经网络的目数时，也按亏的目数评价，取较差的那个（大优或大劣时胜率几乎不变，目数更能说明问题） */
+function quality(delta, isBest, pts) {
+  if (isBest) return QUALITY[0];
+  let q = delta < 0.03 ? 1 : delta < 0.08 ? 2 : delta < 0.15 ? 3 : 4;
+  if (pts !== null && pts !== undefined) q = Math.max(q, pts < 1 ? 1 : pts < 2.5 ? 2 : pts < 5 ? 3 : 4);
+  return QUALITY[q];
 }
+const ptsText = v => `${Math.round(Math.abs(v) * 2) / 2} 目`;
 
 async function makeComment(j) {
   const A = S.analyses[j], B = S.analyses[j + 1];
@@ -524,16 +672,22 @@ async function makeComment(j) {
   const isBest = !!top && top.move === m;
   const wrBest = top ? Math.max(top.wr, wrMove) : wrMove;
   const delta = isBest ? 0 : Math.max(0, wrBest - wrMove);
+  // 神经网络的领先目数：这手棋比最佳下法亏了几目
+  let pts = null, leadAfter = null;
+  if (A.nn && B.nn && top) {
+    leadAfter = cand && top && cand.visits >= 0.15 * top.visits ? cand.lead : -B.lead;
+    pts = isBest ? 0 : Math.max(0, Math.max(top.lead, leadAfter) - leadAfter);
+  }
   const cm = {
-    j, color: c, you, who: me, move: m, name: pre.name(m), q: quality(delta, isBest),
+    j, color: c, you, who: me, move: m, name: pre.name(m), q: quality(delta, isBest, pts), pts, leadAfter,
     wrBefore: wrBest, wrAfter: wrMove,
     reasons: G.explain(pre, m, c, A.own, B.own, me, op),
     best: null, isBest,
     eased: !you && S.prefs.target < 100 && !isBest && delta >= 0.05,
     wrNext: B.wr,
   };
-  if (you && top && !isBest && delta >= 0.03) {
-    cm.best = { move: top.move, name: pre.name(top.move), wr: top.wr, reasons: null };
+  if (you && top && !isBest && (delta >= 0.03 || (pts !== null && pts >= 1.5))) {
+    cm.best = { move: top.move, name: pre.name(top.move), wr: top.wr, pts, reasons: null };
   }
   cm.gain = gainPoints(pre, c, A.own, B.own);
   if (cm.gain.length) cm.reasons.push(`这手之后更可能变成${me}地盘的点：${cm.gain.slice(0, 12).join('、')}${cm.gain.length > 12 ? ' 等' : ''}（共 ${cm.gain.length} 个，点“在棋盘上看”）。`);
@@ -730,10 +884,10 @@ function buildSummary() {
       facts.push(t);
     }
     const drops = Object.values(S.comments)
-      .filter(c => !c.simple && c.q && (pv || c.color === me) && c.wrBefore - c.wrAfter > 0.06)
-      .sort((x, y) => (y.wrBefore - y.wrAfter) - (x.wrBefore - x.wrAfter)).slice(0, 3);
+      .filter(c => !c.simple && c.q && (pv || c.color === me) && (c.wrBefore - c.wrAfter > 0.06 || c.pts >= 4))
+      .sort((x, y) => (y.wrBefore - y.wrAfter + (y.pts || 0) / 40) - (x.wrBefore - x.wrAfter + (x.pts || 0) / 40)).slice(0, 3);
     for (const c of drops) {
-      const t = `第 ${c.j + 1} 手 ${esc(c.who || '你')}下 ${esc(c.name)}（${c.q.label}）：胜率从 ${pct(c.wrBefore)} 降到 ${pct(c.wrAfter)}${c.best ? `，更好的是 <b>${esc(c.best.name)}</b>` : ''}。`;
+      const t = `第 ${c.j + 1} 手 ${esc(c.who || '你')}下 ${esc(c.name)}（${c.q.label}）：胜率从 ${pct(c.wrBefore)} 降到 ${pct(c.wrAfter)}${c.pts >= 0.5 ? `，亏了约 ${ptsText(c.pts)}` : ''}${c.best ? `，更好的是 <b>${esc(c.best.name)}</b>` : ''}。`;
       items.push({ html: t, j: c.j });
       facts.push(t.replace(/<[^>]+>/g, ''));
     }
@@ -1899,6 +2053,14 @@ function setWr(left, frac, right, blackWhite) {
   $('wrFill').style.width = `${Math.round(frac * 100)}%`;
 }
 
+/** 你（真人对战时是黑方）领先的目数，只有神经网络的分析才有 */
+function humanLead() {
+  const la = latestAnalysis(S.analyses, S.history.length);
+  if (!la || !la.a.nn) return null;
+  return (pvp() ? BLACK : S.game.human) === BLACK ? la.a.score : -la.a.score;
+}
+const leadNote = v => (v === null ? '' : Math.abs(v) < 0.5 ? ' · 均势' : ` · ${v > 0 ? '领先' : '落后'}${Math.round(Math.abs(v) * 2) / 2}目`);
+
 function humanWr() {
   const la = latestAnalysis(S.analyses, S.history.length);
   if (!la) return null;
@@ -1947,9 +2109,10 @@ function commentHtml(c) {
   if (c.you) {
     let h = `<div class="cm ${c.q.cls}${S.view === c.j ? ' viewing' : ''}" data-j="${c.j}">
       <div class="h"><b>${num}</b> ${esc(c.who || '你')}下 ${esc(c.name)} <span class="tag ${c.q.cls}">${c.q.label}</span>
-      <span class="wr">胜率 ${pct(c.wrBefore)} → ${pct(c.wrAfter)}</span></div>${reasonsHtml(c.reasons)}`;
+      <span class="wr">胜率 ${pct(c.wrBefore)} → ${pct(c.wrAfter)}${c.pts >= 0.5 ? ` · 亏 ${ptsText(c.pts)}` : ''}</span></div>${reasonsHtml(c.reasons)}`;
+    if (c.leadAfter !== null && c.leadAfter !== undefined) h += `<p class="note">这手之后，${esc(c.who || '你')}${c.leadAfter >= 0 ? '领先' : '落后'}约 ${ptsText(c.leadAfter)}（按数子、含贴目）。</p>`;
     if (c.best) {
-      h += `<div class="better">更好的是 <b>${esc(c.best.name)}</b>（胜率约 ${pct(c.best.wr)}）${reasonsHtml(c.best.reasons)}</div>`;
+      h += `<div class="better">更好的是 <b>${esc(c.best.name)}</b>（胜率约 ${pct(c.best.wr)}${c.best.pts >= 0.5 ? `，比实战多 ${ptsText(c.best.pts)}` : ''}）${reasonsHtml(c.best.reasons)}</div>`;
     }
     if (c.gain && c.gain.length) h += `<p><button class="small" data-gain="${c.j}">在棋盘上看这些目</button></p>`;
     if (c.q.cls === 'slow' || c.q.cls === 'bad') h += '<p class="note">点这条点评，可以回看当时的局面并试下。</p>';
@@ -2123,8 +2286,8 @@ function render() {
     } else {
       const hw = humanWr();
       if (hw === null) setWr();
-      else if (pvp()) setWr(`黑 ${pct(hw)}`, hw, `白 ${pct(1 - hw)}`, true);
-      else setWr(`你 ${pct(hw)}`, hw, `AI ${pct(1 - hw)}`);
+      else if (pvp()) setWr(`黑 ${pct(hw)}${leadNote(humanLead())}`, hw, `白 ${pct(1 - hw)}`, true);
+      else setWr(`你 ${pct(hw)}${leadNote(humanLead())}`, hw, `AI ${pct(1 - hw)}`);
     }
     $('status').textContent = statusText();
     const my = canHumanMove();
@@ -2418,13 +2581,18 @@ function openNewGame() {
   fillHandicap(S.game.size, S.game.handicap);
   fNew.komi.value = S.game.komiAuto === false ? String(S.game.komi) : 'auto';
   fNew.level.value = String(S.prefs.level);
+  fNew.engine.value = S.prefs.engine || 'b10';
+  showEngineStatus();
   fNew.target.value = String(S.prefs.target);
   showTarget();
   dlgNew.returnValue = '';
   dlgNew.showModal();
 }
 
-fNew.level.innerHTML = LEVELS.map((l, i) => `<option value="${i}">${l.name}${i === 0 ? '（适合新手）' : i === 4 ? '（思考较久）' : ''}</option>`).join('');
+fNew.level.innerHTML = LEVELS.map((l, i) => `<option value="${i}">${l.name}${l.note ? `（${l.note}）` : ''}</option>`).join('');
+fNew.engine.innerHTML = Object.entries(ENGINES).map(([k, v]) => `<option value="${k}">${v}</option>`).join('');
+function showEngineStatus() { const el = $('engineStatus'); if (el) el.textContent = nn.status(); }
+
 fNew.size.addEventListener('change', () => fillHandicap(+fNew.size.value, +fNew.handicap.value));
 fNew.target.addEventListener('input', showTarget);
 $('versionText').textContent = `版本 ${APP_VERSION}`;
@@ -2434,10 +2602,14 @@ dlgNew.addEventListener('close', () => {
   if (rv !== 'ok' && rv !== 'apply') return;
   S.prefs.level = +fNew.level.value;
   S.prefs.target = +fNew.target.value;
+  S.prefs.engine = fNew.engine.value;
+  const engineChanged = nn.model !== S.prefs.engine;
+  if (engineChanged) { cancelWork(); nn.start(S.prefs.engine); }
   if (rv === 'apply') {
     save();
     render();
     toast('AI 设置已更新，从下一手开始生效');
+    if (engineChanged && S.mode === 'play') advance();
     return;
   }
   const rule = fNew.rule.value;
@@ -2644,6 +2816,7 @@ $('fileImport').addEventListener('change', e => { if (e.target.files[0]) importR
 
 loadRecords();
 const firstRun = load();
+nn.start(S.prefs.engine || 'b10');
 fillGameSelect();
 fillProblemSelect();
 if (S.mode === 'practice') practiceStart();

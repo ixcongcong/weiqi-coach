@@ -28,6 +28,8 @@ function goEngine(root) {
       this.ko = NONE; this.toPlay = BLACK; this.lastMove = NONE;
       this.passes = 0; this.moveCount = 0; this.capB = 0; this.capW = 0;
       this.lastLib = 0;
+      // 神经网络需要最近几手和前两个局面（只有 track 为 true 的棋盘才记录，模拟对局不记录）
+      this.track = true; this.hist = null; this.prev = null;
       for (let i = 0; i < this.size; i++) {
         const x = i % w, y = (i / w) | 0;
         this.b[i] = (x === 0 || y === 0 || x === w - 1 || y === w - 1) ? BORDER : EMPTY;
@@ -39,6 +41,7 @@ function goEngine(root) {
       g.b.set(s.b);
       g.ko = s.ko; g.toPlay = s.toPlay; g.lastMove = s.lastMove; g.passes = s.passes;
       g.moveCount = s.moveCount; g.capB = s.capB; g.capW = s.capW;
+      g.track = !!s.track; g.hist = s.hist || null; g.prev = s.prev || null;
       return g;
     }
 
@@ -46,6 +49,7 @@ function goEngine(root) {
       return {
         n: this.n, b: this.b.slice(), ko: this.ko, toPlay: this.toPlay, lastMove: this.lastMove,
         passes: this.passes, moveCount: this.moveCount, capB: this.capB, capW: this.capW,
+        track: this.track, hist: this.hist, prev: this.prev,
       };
     }
 
@@ -53,9 +57,10 @@ function goEngine(root) {
       this.b.set(o.b);
       this.ko = o.ko; this.toPlay = o.toPlay; this.lastMove = o.lastMove; this.passes = o.passes;
       this.moveCount = o.moveCount; this.capB = o.capB; this.capW = o.capW;
+      this.hist = o.hist; this.prev = o.prev;
     }
 
-    copy() { const g = new Board(this.n); g.copyFrom(this); return g; }
+    copy() { const g = new Board(this.n); g.copyFrom(this); g.track = this.track; return g; }
 
     setup(points) {
       for (const p of points) this.b[p] = BLACK;
@@ -146,6 +151,11 @@ function goEngine(root) {
     }
 
     play(p) {
+      if (this.track && (p === PASS || this.isLegal(p, this.toPlay))) {
+        // 记录：新数组，不改旧的（复制棋盘时只复制引用）
+        this.prev = [this.b.slice(), this.prev ? this.prev[0] : null];
+        this.hist = (this.hist ? this.hist.slice(-4) : []).concat([[p, this.toPlay]]);
+      }
       if (p === PASS) {
         this.passes++; this.ko = NONE; this.lastMove = PASS;
         this.toPlay = 3 - this.toPlay; this.moveCount++;
@@ -289,6 +299,7 @@ function goEngine(root) {
     const deadline = Date.now() + ms;
     const rnd = makeRng(seed);
     const bd = new Board(pos.n);
+    bd.track = false;
     const rootNode = new Node(NONE, 3 - pos.toPlay, 0, 0);
     const maxPath = 512;
     const path = new Array(maxPath);
@@ -396,6 +407,7 @@ function goEngine(root) {
   /** 从局面出发做 count 盘模拟，累计每个点的归属（黑 +1，白 -1）和平均目差。 */
   function ownershipSum(pos, count, komi, seed) {
     const bd = new Board(pos.n), rnd = makeRng(seed);
+    bd.track = false;
     const own = new Float32Array(pos.size);
     let score = 0;
     for (let i = 0; i < count; i++) {
@@ -701,6 +713,7 @@ function goEngine(root) {
     for (const m of candidates(b, target, wide, false)) {
       if (!b.isLegal(m, a)) continue;
       const c = b.copy();
+      c.track = false;
       c.play(m);
       if (c.b[target] === EMPTY) return [m];
       const r = defend(c, target, depth - 1, wide);
@@ -719,6 +732,7 @@ function goEngine(root) {
       if (!b.isLegal(m, d)) continue;
       any = true;
       const c = b.copy();
+      c.track = false;
       c.play(m);
       const r = attack(c, target, depth - 1, wide);
       if (!r) return null;
@@ -726,6 +740,7 @@ function goEngine(root) {
     }
     if (!any) {
       const c = b.copy();
+      c.track = false;
       c.play(PASS);
       const r = attack(c, target, depth - 1, wide);
       return r ? [PASS, ...r] : null;
@@ -739,6 +754,7 @@ function goEngine(root) {
     for (const m of candidates(b, target, wide, true)) {
       if (!b.isLegal(m, b.toPlay)) continue;
       const c = b.copy();
+      c.track = false;
       c.play(m);
       if (!attack(c, target, depth - 1, wide)) return m;
     }

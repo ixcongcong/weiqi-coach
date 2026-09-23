@@ -13,14 +13,6 @@ function saveAI() { try { localStorage.setItem(AI_KEY, JSON.stringify(AI)); } ca
 
 // ---------------- 局面工具 ----------------
 
-function nameToPt(b, name) {
-  const m = /^([A-HJ-T])(\d{1,2})$/i.exec(String(name).trim());
-  if (!m) return -1;
-  const x = G.LETTERS.indexOf(m[1].toUpperCase()), row = +m[2];
-  if (x < 0 || x >= b.n || row < 1 || row > b.n) return -1;
-  return b.pt(x, b.n - row);
-}
-
 /** 从一段文字里找出棋盘坐标（例如 D4、q16）。 */
 function coordsIn(text, b) {
   const out = [];
@@ -272,9 +264,10 @@ function buildFacts(ctx) {
       const o = ctx.a.own[p] * sgn(me);
       if (o > 0.5) mine.push(p); else if (o < -0.5) theirs.push(p);
     }
+    if (ctx.a.nn) lines.push('【引擎】KataGo 神经网络（业余高段以上水平）的分析，胜率和目数都比较可靠。');
     lines.push(`【引擎分析】${ctx.meName}的胜率约 ${pct(meWr)}；形势：${ctx.a.score > 0 ? '黑' : '白'}领先约 ${Math.abs(ctx.a.score).toFixed(1)}（含贴目）。`);
     lines.push(`【地盘估计】${ctx.meName}的空点 ${mine.length} 个 [${names(b, mine, 30)}]；对方的空点 ${theirs.length} 个 [${names(b, theirs, 30)}]。`);
-    lines.push(`【引擎推荐】${ctx.a.cands.slice(0, 3).map(c => `${b.name(c.move)}（走后胜率 ${pct(c.wr)}）`).join('，')}（这是轮到${colorName(ctx.a.toPlay)}时的推荐）`);
+    lines.push(`【引擎推荐】${ctx.a.cands.slice(0, 3).map(c => `${b.name(c.move)}（走后胜率 ${pct(c.wr)}${c.lead !== undefined ? `，走后${c.lead >= 0 ? '领先' : '落后'}约 ${Math.abs(c.lead).toFixed(1)} 目` : ''}）`).join('，')}（这是轮到${colorName(ctx.a.toPlay)}时的推荐）`);
   }
   if (S.mode === 'play' && S.summary && (S.result || S.scoring)) lines.push(`【本局总结】\n${S.summary.facts}`);
   const cm = ctx.lastComment;
