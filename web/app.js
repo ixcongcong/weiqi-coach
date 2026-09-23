@@ -1,8 +1,10 @@
 'use strict';
-/* 围棋对战教练：界面、对局流程、讲解。引擎在 engine.js，计算在 Web Worker 里进行。 */
+/* 围棋对战教练：界面、对局流程、棋谱学习、讲解。引擎在 engine.js，计算在 Web Worker 里进行。 */
 
+const APP_VERSION = '2.1';
 const G = window.Go;
 const { EMPTY, BLACK, WHITE, PASS, NONE, RESIGN } = G;
+const GAMES = window.GAMES || [];
 
 const LEVELS = [
   { name: '入门', playouts: 300, ms: 1000, random: true },
@@ -17,12 +19,14 @@ const BUDGET = {
   13: { playouts: 5000, ms: 3000, own: 300 },
   19: { playouts: 4000, ms: 3500, own: 240 },
 };
+const STUDY_BUDGET = { playouts: 2500, ms: 2000, own: 200 };
 const FINAL_OWN = { 9: 1200, 13: 900, 19: 600 };
 const STORE_KEY = 'weiqi-coach-v1';
 
 const $ = id => document.getElementById(id);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const pct = v => Math.round(v * 100) + '%';
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const colorName = c => (c === BLACK ? '黑' : '白');
 const esc = s => String(s).replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
 
@@ -125,6 +129,7 @@ const pool = new Pool();
 // ---------------- 状态 ----------------
 
 const S = {
+  mode: 'play',
   game: { size: 9, human: BLACK, handicap: 0, komi: 7.5 },
   prefs: { level: 2, target: 100, coach: true, confirm: false, cands: false, own: false },
   setup: [],
@@ -144,6 +149,14 @@ const S = {
   pendingTap: NONE,
 };
 
+// 棋谱学习的状态
+const T = {
+  gi: 0, idx: 0, gen: 0,
+  analyses: [], aprom: [], comments: {},
+  guess: false, hit: 0, tried: 0, lastGuess: null,
+  auto: 0, cache: null,
+};
+
 function boardAt(k) {
   const b = new G.Board(S.game.size);
   b.setup(S.setup);
@@ -158,8 +171,9 @@ function rebuild() { S.board = boardAt(S.history.length); }
 function save() {
   try {
     localStorage.setItem(STORE_KEY, JSON.stringify({
-      game: S.game, prefs: S.prefs, setup: S.setup, history: S.history,
+      mode: S.mode, game: S.game, prefs: S.prefs, setup: S.setup, history: S.history,
       result: S.scoring ? null : S.result, comments: S.comments,
+      study: { gi: T.gi, idx: T.idx },
     }));
   } catch (e) { /* 存储不可用时忽略 */ }
 }
@@ -174,17 +188,25 @@ function load() {
       S.history = d.history || [];
       S.result = d.result || null;
       S.comments = d.comments || {};
+      S.mode = d.mode === 'study' ? 'study' : 'play';
+      if (d.study) {
+        T.gi = clamp(d.study.gi | 0, 0, Math.max(0, GAMES.length - 1));
+        T.idx = d.study.idx | 0;
+      }
     }
   } catch (e) { /* 数据损坏时从新局开始 */ }
   rebuild();
 }
 
+/** 停掉所有后台计算，让进行中的结果作废。 */
 function cancelWork() {
   S.gen++;
+  T.gen++;
   pool.cancel();
   S.aiThinking = false;
   S.scoringBusy = false;
   S.aprom = S.aprom.map((p, k) => (S.analyses[k] ? p : undefined));
+  T.aprom = T.aprom.map((p, k) => (T.analyses[k] ? p : undefined));
 }
 
 function truncate(len) {
@@ -194,11 +216,11 @@ function truncate(len) {
 }
 
 function canHumanMove() {
-  return !S.result && !S.scoring && !S.scoringBusy && S.view === null &&
+  return S.mode === 'play' && !S.result && !S.scoring && !S.scoringBusy && S.view === null &&
     S.board.toPlay === S.game.human && !S.aiThinking;
 }
 
-// ---------------- 分析与对局流程 ----------------
+// ---------------- 对战：分析与流程 ----------------
 
 function getAnalysis(k) {
   if (S.analyses[k]) return Promise.resolve(S.analyses[k]);
@@ -235,7 +257,7 @@ async function advance() {
 
 async function step() {
   const gen = S.gen;
-  while (gen === S.gen && !S.result && !S.scoring && !S.scoringBusy) {
+  while (gen === S.gen && S.mode === 'play' && !S.result && !S.scoring && !S.scoringBusy) {
     const k = S.history.length;
     const a = await getAnalysis(k);
     if (gen !== S.gen || !a) return;
@@ -349,7 +371,7 @@ function scoreText() {
   return `黑 ${sc.black} 子，白 ${sc.white} 子（贴 ${S.game.komi}）\n${d > 0 ? '黑' : '白'}胜 ${Math.abs(d)} 子`;
 }
 
-// ---------------- 讲解 ----------------
+// ---------------- 对战：讲解 ----------------
 
 function quality(delta, isBest) {
   if (isBest) return { cls: 'best', label: '最佳 ✨' };
@@ -417,7 +439,7 @@ async function showHint() {
   render();
 }
 
-// ---------------- 操作 ----------------
+// ---------------- 对战：操作 ----------------
 
 function newGame(opts) {
   cancelWork();
@@ -476,25 +498,6 @@ function resign() {
   ]);
 }
 
-function onBoardTap(p) {
-  if (p === NONE || S.view !== null) return;
-  if (S.scoring) {
-    if (S.scoring.toggle(p)) render();
-    return;
-  }
-  if (!canHumanMove()) return;
-  if (!S.board.isLegal(p, S.game.human)) {
-    if (S.board.b[p] === EMPTY) toast(p === S.board.ko ? '打劫：需要先在别处走一手，才能提回' : '这里不能落子（禁着点）');
-    return;
-  }
-  if (S.prefs.confirm && S.pendingTap !== p) {
-    S.pendingTap = p;
-    drawBoard();
-    return;
-  }
-  playMove(p);
-}
-
 function openReview(j) {
   if (j >= S.history.length) return;
   S.view = S.view === j ? null : j;
@@ -502,20 +505,160 @@ function openReview(j) {
   render();
 }
 
-// ---------------- 绘制棋盘 ----------------
+// ---------------- 棋谱学习 ----------------
+
+function sg() { return GAMES[T.gi]; }
+
+function sgfPt(b, s) {
+  return s === 'tt' ? PASS : b.pt(s.charCodeAt(0) - 97, s.charCodeAt(1) - 97);
+}
+
+function gameMoves(g) {
+  if (!g._moves) {
+    const b = new G.Board(g.size);
+    g._moves = [];
+    for (let i = 0; i < g.moves.length; i += 2) g._moves.push(sgfPt(b, g.moves.slice(i, i + 2)));
+  }
+  return g._moves;
+}
+
+function studyBoardAt(i) {
+  const g = sg();
+  if (T.cache && T.cache.gi === T.gi && T.cache.i === i) return T.cache.b.copy();
+  const b = new G.Board(g.size);
+  const pts = s => {
+    const r = [];
+    for (let k = 0; k < s.length; k += 2) r.push(sgfPt(b, s.slice(k, k + 2)));
+    return r;
+  };
+  b.setupStones(pts(g.ab), pts(g.aw), g.first === 'W' ? WHITE : BLACK);
+  const mv = gameMoves(g);
+  for (let k = 0; k < i && k < mv.length; k++) b.play(mv[k]);
+  T.cache = { gi: T.gi, i, b: b.copy() };
+  return b;
+}
+
+function getStudyAnalysis(i) {
+  if (T.analyses[i]) return Promise.resolve(T.analyses[i]);
+  if (!T.aprom[i]) {
+    const gen = T.gen, gi = T.gi;
+    T.aprom[i] = pool.analyze(studyBoardAt(i), STUDY_BUDGET, sg().komi || 0).then(a => {
+      if (!a || gen !== T.gen || gi !== T.gi) return null;
+      T.analyses[i] = a;
+      studyComment(i - 1);
+      studyComment(i);
+      if (S.mode === 'study') render();
+      return a;
+    });
+  }
+  return T.aprom[i];
+}
+
+function studyComment(i) {
+  if (i < 0 || T.comments[i]) return;
+  const A = T.analyses[i], B = T.analyses[i + 1];
+  if (!A || !B) return;
+  const pre = studyBoardAt(i), m = gameMoves(sg())[i], c = pre.toPlay;
+  const top = A.cands[0];
+  let reasons = G.explain(pre, m, c, A.own, B.own, colorName(c), colorName(3 - c));
+  if (sg().kind !== 'lesson') {
+    // 本机引擎远弱于名局里的高手：不让它给大师的棋下“亏了”的结论
+    const n0 = reasons.length;
+    reasons = reasons.filter(r => !r.startsWith('这手棋让形势亏了') && !r.startsWith('一路的棋通常价值很小'));
+    if (reasons.length < n0 || !reasons.length) {
+      reasons.push('这手棋的深意超出了本机引擎的计算能力。高手的着法往往着眼于几十手之后，值得反复琢磨。');
+    }
+  }
+  T.comments[i] = {
+    reasons,
+    top: top ? { name: pre.name(top.move), same: top.move === m } : null,
+    blackWr: B.toPlay === BLACK ? B.wr : 1 - B.wr,
+  };
+}
+
+function studyGo(idx) {
+  const n = gameMoves(sg()).length;
+  T.idx = clamp(idx, 0, n);
+  const want = new Set([T.idx - 1, T.idx, T.idx + 1].filter(i => i >= 0 && i <= n));
+  const stale = T.aprom.some((p, i) => p && !T.analyses[i] && !want.has(i));
+  if (stale) {
+    T.gen++;
+    pool.cancel();
+    T.aprom = T.aprom.map((p, i) => (T.analyses[i] ? p : undefined));
+  }
+  for (const i of [T.idx, T.idx - 1, T.idx + 1]) if (want.has(i)) getStudyAnalysis(i);
+  save();
+  render();
+}
+
+function selectGame(gi) {
+  stopAuto();
+  T.gen++;
+  pool.cancel();
+  T.gi = gi;
+  T.analyses = [];
+  T.aprom = [];
+  T.comments = {};
+  T.cache = null;
+  T.hit = T.tried = 0;
+  T.lastGuess = null;
+  studyGo(0);
+}
+
+function stopAuto() {
+  if (T.auto) { clearInterval(T.auto); T.auto = 0; }
+}
+
+function toggleAuto() {
+  if (T.auto) { stopAuto(); render(); return; }
+  T.auto = setInterval(() => {
+    if (S.mode !== 'study' || T.idx >= gameMoves(sg()).length) { stopAuto(); render(); return; }
+    studyGo(T.idx + 1);
+  }, 3500);
+  studyGo(T.idx + 1);
+}
+
+function studyTap(p) {
+  if (!T.guess || p === NONE) return;
+  const mv = gameMoves(sg());
+  if (T.idx >= mv.length) return;
+  const b = studyBoardAt(T.idx), actual = mv[T.idx];
+  T.tried++;
+  if (p === actual) {
+    T.hit++;
+    T.lastGuess = { ok: true, at: T.idx + 1 };
+    toast('猜中了！✨');
+  } else {
+    T.lastGuess = { ok: false, at: T.idx + 1, p, guess: b.name(p), actual: b.name(actual) };
+    toast(`实战下在 ${b.name(actual)}`);
+  }
+  studyGo(T.idx + 1);
+}
+
+function setMode(m) {
+  if (S.mode === m) return;
+  stopAuto();
+  cancelWork();
+  S.mode = m;
+  S.ghost = NONE;
+  save();
+  layout();
+  render();
+  if (m === 'play') advance();
+  else studyGo(T.idx);
+}
+
+// ---------------- 棋盘绘制 ----------------
 
 const canvas = $('board'), ctx = canvas.getContext('2d');
-let geom = { cell: 0, org: 0, px: 0 };
+const geom = { cell: 0, org: 0, px: 0, n: 9 };
 
 function layout() {
   const wrap = $('boardWrap');
   const landscape = innerWidth >= innerHeight;
   let size;
-  if (landscape) {
-    size = Math.min(wrap.clientWidth - 16, wrap.clientHeight - 16);
-  } else {
-    size = Math.min(innerWidth - 16, innerHeight * 0.56);
-  }
+  if (landscape) size = Math.min(wrap.clientWidth, wrap.clientHeight) - 12;
+  else size = Math.min(innerWidth - 12, innerHeight * 0.62);
   size = Math.max(200, Math.floor(size));
   const dpr = window.devicePixelRatio || 1;
   canvas.style.width = canvas.style.height = size + 'px';
@@ -523,11 +666,10 @@ function layout() {
   geom.px = size;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   drawBoard();
-  drawGraph();
 }
 
-function latestAnalysis(k) {
-  for (let i = k; i >= 0; i--) if (S.analyses[i]) return { a: S.analyses[i], k: i };
+function latestAnalysis(list, k) {
+  for (let i = k; i >= 0; i--) if (list[i]) return { a: list[i], k: i };
   return null;
 }
 
@@ -552,13 +694,25 @@ function starPoints(n) {
   return r;
 }
 
+/** 当前要画的局面，以及它的分析、候选点视角等。 */
+function boardView() {
+  if (S.mode === 'study') {
+    const n = gameMoves(sg()).length;
+    return {
+      b: studyBoardAt(T.idx), k: T.idx, list: T.analyses, study: true,
+      ghostColor: T.guess && T.idx < n ? studyBoardAt(T.idx).toPlay : 0,
+    };
+  }
+  if (S.view !== null) return { b: boardAt(S.view), k: S.view, list: S.analyses, review: true };
+  return { b: S.board, k: S.history.length, list: S.analyses, ghostColor: canHumanMove() ? S.game.human : 0 };
+}
+
 function drawBoard() {
   const s = geom.px;
   if (!s) return;
-  const viewing = S.view !== null;
-  const b = viewing ? boardAt(S.view) : S.board;
+  const v = boardView(), b = v.b;
   const n = b.n, cell = s / (n + 0.8), org = cell * 0.9, end = org + (n - 1) * cell;
-  geom.cell = cell; geom.org = org;
+  geom.cell = cell; geom.org = org; geom.n = n;
   const X = p => org + b.x(p) * cell, Y = p => org + b.y(p) * cell;
 
   const bg = ctx.createLinearGradient(0, 0, s, s);
@@ -570,9 +724,9 @@ function drawBoard() {
   ctx.lineWidth = Math.max(1, cell * 0.035);
   ctx.beginPath();
   for (let i = 0; i < n; i++) {
-    const v = org + i * cell;
-    ctx.moveTo(org, v); ctx.lineTo(end, v);
-    ctx.moveTo(v, org); ctx.lineTo(v, end);
+    const t = org + i * cell;
+    ctx.moveTo(org, t); ctx.lineTo(end, t);
+    ctx.moveTo(t, org); ctx.lineTo(t, end);
   }
   ctx.stroke();
   ctx.lineWidth = Math.max(1.5, cell * 0.06);
@@ -585,52 +739,49 @@ function drawBoard() {
   ctx.font = `${Math.round(cell * 0.3)}px -apple-system, sans-serif`;
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   for (let i = 0; i < n; i++) {
-    const v = org + i * cell;
-    ctx.fillText(G.LETTERS[i], v, org - cell * 0.55);
-    ctx.fillText(String(n - i), org - cell * 0.6, v);
+    const t = org + i * cell;
+    ctx.fillText(G.LETTERS[i], t, org - cell * 0.55);
+    ctx.fillText(String(n - i), org - cell * 0.6, t);
   }
 
   const r = cell * 0.47;
-  const k = viewing ? S.view : S.history.length;
+  const scoring = !v.study && !v.review ? S.scoring : null;
 
-  // 形势（归属）覆盖层
-  if (S.prefs.own && !S.scoring) {
-    const la = latestAnalysis(k);
+  if (S.mode === 'play' && S.prefs.own && !scoring) {
+    const la = latestAnalysis(v.list, v.k);
     if (la) {
       for (let p = 0; p < b.size; p++) {
         if (b.b[p] === G.BORDER) continue;
-        const v = la.a.own[p];
-        if (Math.abs(v) < 0.2) continue;
-        const h = cell * 0.42 * Math.min(1, Math.abs(v));
-        ctx.fillStyle = v > 0 ? `rgba(0,0,0,${0.15 + 0.35 * Math.abs(v)})` : `rgba(255,255,255,${0.25 + 0.5 * Math.abs(v)})`;
+        const o = la.a.own[p];
+        if (Math.abs(o) < 0.2) continue;
+        const h = cell * 0.42 * Math.min(1, Math.abs(o));
+        ctx.fillStyle = o > 0 ? `rgba(0,0,0,${0.15 + 0.35 * Math.abs(o)})` : `rgba(255,255,255,${0.25 + 0.5 * Math.abs(o)})`;
         ctx.fillRect(X(p) - h / 2, Y(p) - h / 2, h, h);
       }
     }
   }
 
-  // 预览落子
-  const ghost = S.pendingTap !== NONE ? S.pendingTap : S.ghost;
-  if (!viewing && ghost >= 0 && b.b[ghost] === EMPTY && canHumanMove()) {
+  const ghost = S.pendingTap !== NONE && !v.study ? S.pendingTap : S.ghost;
+  if (v.ghostColor && ghost >= 0 && b.b[ghost] === EMPTY) {
     ctx.strokeStyle = 'rgba(21,101,192,.45)';
     ctx.lineWidth = Math.max(2, cell * 0.06);
     ctx.beginPath();
     ctx.moveTo(org, Y(ghost)); ctx.lineTo(end, Y(ghost));
     ctx.moveTo(X(ghost), org); ctx.lineTo(X(ghost), end);
     ctx.stroke();
-    drawStone(X(ghost), Y(ghost), r, S.game.human, S.pendingTap === ghost ? 0.8 : 0.5);
+    drawStone(X(ghost), Y(ghost), r, v.ghostColor, S.pendingTap === ghost ? 0.8 : 0.5);
   }
 
   for (let p = 0; p < b.size; p++) {
-    const v = b.b[p];
-    if (v !== BLACK && v !== WHITE) continue;
-    const dead = S.scoring && !viewing && S.scoring.dead[p];
-    drawStone(X(p), Y(p), r, v, dead ? 0.35 : 1);
+    const c = b.b[p];
+    if (c !== BLACK && c !== WHITE) continue;
+    drawStone(X(p), Y(p), r, c, scoring && scoring.dead[p] ? 0.35 : 1);
   }
 
-  if (S.scoring && !viewing) {
+  if (scoring) {
     const h = cell * 0.16;
     for (let p = 0; p < b.size; p++) {
-      const t = S.scoring.terr[p];
+      const t = scoring.terr[p];
       if (!t) continue;
       ctx.fillStyle = t === BLACK ? '#111' : '#fafafa';
       ctx.fillRect(X(p) - h, Y(p) - h, 2 * h, 2 * h);
@@ -638,28 +789,26 @@ function drawBoard() {
     }
   }
 
-  // 候选点
+  // 候选点：数字是走那里之后，下这手的一方的胜率
   let cands = null;
-  if (viewing) {
-    const A = S.analyses[S.view];
-    if (A) cands = A.cands.slice(0, 3);
-  } else if ((S.prefs.cands || (S.hint && !S.hint.loading)) && canHumanMove() && S.analyses[k]) {
-    cands = S.analyses[k].cands.slice(0, 3);
+  if (v.review) {
+    if (S.analyses[S.view]) cands = S.analyses[S.view].cands.slice(0, 3);
+  } else if (!v.study && (S.prefs.cands || (S.hint && !S.hint.loading)) && canHumanMove() && S.analyses[v.k]) {
+    cands = S.analyses[v.k].cands.slice(0, 3);
   }
   if (cands) {
     const cols = ['#2e7d32', '#1565c0', '#6a1b9a'];
     cands.forEach((c, i) => {
       if (c.move < 0 || b.b[c.move] !== EMPTY) return;
-      const humanWr = b.toPlay === S.game.human ? c.wr : 1 - c.wr;
       ctx.fillStyle = cols[i] + 'cc';
       ctx.beginPath(); ctx.arc(X(c.move), Y(c.move), r * 0.92, 0, Math.PI * 2); ctx.fill();
       ctx.fillStyle = '#fff';
       ctx.font = `bold ${Math.round(cell * 0.3)}px -apple-system, sans-serif`;
-      ctx.fillText(String(Math.round(humanWr * 100)), X(c.move), Y(c.move) + 1);
+      ctx.fillText(String(Math.round(c.wr * 100)), X(c.move), Y(c.move) + 1);
     });
   }
 
-  if (viewing) {
+  if (v.review) {
     const m = S.history[S.view];
     if (m >= 0) {
       drawStone(X(m), Y(m), r, b.toPlay, 0.55);
@@ -667,19 +816,59 @@ function drawBoard() {
       ctx.lineWidth = Math.max(2, r * 0.18);
       ctx.beginPath(); ctx.arc(X(m), Y(m), r * 0.95, 0, Math.PI * 2); ctx.stroke();
     }
-  } else if (b.lastMove >= 0 && !S.scoring) {
-    ctx.fillStyle = '#e53935';
-    ctx.beginPath(); ctx.arc(X(b.lastMove), Y(b.lastMove), r * 0.28, 0, Math.PI * 2); ctx.fill();
+  } else if (b.lastMove >= 0 && !scoring) {
+    const lm = b.lastMove;
+    if (v.study) {
+      // 棋谱里在最后一手上标出手数
+      ctx.fillStyle = b.b[lm] === BLACK ? '#fff' : '#111';
+      ctx.font = `bold ${Math.round(cell * (T.idx >= 100 ? 0.3 : 0.36))}px -apple-system, sans-serif`;
+      ctx.fillText(String(T.idx), X(lm), Y(lm) + 1);
+      ctx.strokeStyle = '#e53935';
+      ctx.lineWidth = Math.max(2, r * 0.12);
+      ctx.beginPath(); ctx.arc(X(lm), Y(lm), r * 1.02, 0, Math.PI * 2); ctx.stroke();
+    } else {
+      ctx.fillStyle = '#e53935';
+      ctx.beginPath(); ctx.arc(X(lm), Y(lm), r * 0.28, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  if (v.study && T.lastGuess && !T.lastGuess.ok && T.lastGuess.at === T.idx) {
+    const p = T.lastGuess.p, d = r * 0.45;
+    ctx.strokeStyle = '#1565c0';
+    ctx.lineWidth = Math.max(2, r * 0.16);
+    ctx.beginPath();
+    ctx.moveTo(X(p) - d, Y(p) - d); ctx.lineTo(X(p) + d, Y(p) + d);
+    ctx.moveTo(X(p) + d, Y(p) - d); ctx.lineTo(X(p) - d, Y(p) + d);
+    ctx.stroke();
   }
 }
 
 function toPoint(e) {
   const rect = canvas.getBoundingClientRect();
-  const x = e.clientX - rect.left, y = e.clientY - rect.top;
-  const n = S.board.n;
+  const x = e.clientX - rect.left, y = e.clientY - rect.top, n = geom.n;
   const gx = Math.round((x - geom.org) / geom.cell), gy = Math.round((y - geom.org) / geom.cell);
   if (gx < 0 || gy < 0 || gx >= n || gy >= n) return NONE;
-  return S.board.pt(gx, gy);
+  return (gy + 1) * (n + 2) + gx + 1;
+}
+
+function onBoardTap(p) {
+  if (S.mode === 'study') { studyTap(p); return; }
+  if (p === NONE || S.view !== null) return;
+  if (S.scoring) {
+    if (S.scoring.toggle(p)) render();
+    return;
+  }
+  if (!canHumanMove()) return;
+  if (!S.board.isLegal(p, S.game.human)) {
+    if (S.board.b[p] === EMPTY) toast(p === S.board.ko ? '打劫：需要先在别处走一手，才能提回' : '这里不能落子（禁着点）');
+    return;
+  }
+  if (S.prefs.confirm && S.pendingTap !== p) {
+    S.pendingTap = p;
+    drawBoard();
+    return;
+  }
+  playMove(p);
 }
 
 canvas.addEventListener('pointerdown', e => {
@@ -702,60 +891,32 @@ canvas.addEventListener('pointerleave', e => {
   if (e.pointerType === 'mouse') { S.ghost = NONE; drawBoard(); }
 });
 
-// ---------------- 胜率曲线 ----------------
-
-function humanWrAt(k) {
-  const a = S.analyses[k];
-  if (!a) return null;
-  return a.toPlay === S.game.human ? a.wr : 1 - a.wr;
-}
-
-function drawGraph() {
-  const cv = $('graph'), dpr = window.devicePixelRatio || 1;
-  const w = cv.clientWidth, h = cv.clientHeight;
-  if (!w) return;
-  cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
-  const g = cv.getContext('2d');
-  g.setTransform(dpr, 0, 0, dpr, 0, 0);
-  g.clearRect(0, 0, w, h);
-  g.strokeStyle = '#cfc2ae'; g.setLineDash([4, 4]); g.lineWidth = 1;
-  g.beginPath(); g.moveTo(0, h / 2); g.lineTo(w, h / 2); g.stroke();
-  g.setLineDash([]);
-  const len = S.history.length, span = Math.max(len, 10);
-  const pts = [];
-  for (let k = 0; k <= len; k++) {
-    const v = humanWrAt(k);
-    if (v !== null) pts.push([k / span * (w - 4) + 2, (1 - v) * (h - 4) + 2]);
-  }
-  if (pts.length >= 2) {
-    g.fillStyle = 'rgba(160,82,26,.15)';
-    g.beginPath(); g.moveTo(pts[0][0], h);
-    for (const [x, y] of pts) g.lineTo(x, y);
-    g.lineTo(pts[pts.length - 1][0], h); g.closePath(); g.fill();
-    g.strokeStyle = '#a0521a'; g.lineWidth = 2;
-    g.beginPath();
-    pts.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y)));
-    g.stroke();
-  }
-  if (S.view !== null) {
-    const x = S.view / span * (w - 4) + 2;
-    g.strokeStyle = '#1565c0'; g.lineWidth = 2;
-    g.beginPath(); g.moveTo(x, 0); g.lineTo(x, h); g.stroke();
-  }
-  g.fillStyle = '#7a6446'; g.font = '11px -apple-system, sans-serif';
-  g.fillText('你的胜率', 4, 12);
-}
-
 // ---------------- 侧栏 ----------------
+
+function humanWr() {
+  const la = latestAnalysis(S.analyses, S.history.length);
+  if (!la) return null;
+  return la.a.toPlay === S.game.human ? la.a.wr : 1 - la.a.wr;
+}
 
 function statusText() {
   if (S.view !== null) return `复盘：第 ${S.view + 1} 手`;
   if (S.scoringBusy) return '正在数子…';
   if (S.scoring) return '终局 · 点棋子可切换死活\n' + scoreText();
   if (S.result) return S.result.text;
-  if (S.board.toPlay !== S.game.human) return `AI（${S.prefs.target < 100 ? '让棋模式' : LEVELS[S.prefs.level].name}）思考中…`;
-  let s = `轮到你落子（执${colorName(S.game.human)}）`;
-  if (S.board.lastMove === PASS && S.board.moveCount > 0) s += ' · AI 停了一手';
+  const g = S.game, b = S.board;
+  const info = `${g.size}路 · 第 ${b.moveCount} 手 · 提子 黑${b.capB} 白${b.capW}`;
+  let s;
+  if (b.toPlay !== g.human) s = `AI（${S.prefs.target < 100 ? '让棋' : LEVELS[S.prefs.level].name}）思考中…`;
+  else {
+    s = `轮到你（执${colorName(g.human)}）`;
+    if (b.lastMove === PASS && b.moveCount > 0) s += ' · AI 停了一手';
+  }
+  s += `　${info}`;
+  if (S.prefs.own) {
+    const la = latestAnalysis(S.analyses, S.history.length);
+    if (la) s += `\n形势判断：${la.a.score > 0 ? '黑' : '白'}领先约 ${Math.abs(la.a.score).toFixed(1)} 子`;
+  }
   return s;
 }
 
@@ -781,8 +942,7 @@ function commentHtml(c) {
     <span class="wr">你的胜率 ${pct(yourWr)}</span></div>${reasonsHtml(c.reasons)}</div>`;
 }
 
-function renderCoach() {
-  const box = $('coach');
+function playCoachHtml() {
   let html = '';
   if (S.hint) {
     if (S.hint.loading) html += '<div class="cm hint"><b>提示</b> 正在计算…</div>';
@@ -793,61 +953,93 @@ function renderCoach() {
     }
   }
   if (!S.prefs.coach) {
-    html += '<div class="empty">讲解已关闭。打开“讲解每一手”就能看到每步棋的点评。</div>';
-  } else {
-    const keys = Object.keys(S.comments).map(Number).sort((a, b) => b - a);
-    if (!keys.length) {
-      html += '<div class="empty">下棋后，这里会逐手点评：<br>这步棋好不好、为什么，以及更好的下法。<br>点一条点评可以回看当时的局面。</div>';
-    }
-    for (const j of keys) html += commentHtml(S.comments[j]);
+    return html + '<div class="empty">讲解已关闭。勾选“讲解”就能看到每步棋的点评。</div>';
   }
-  box.innerHTML = html;
+  const keys = Object.keys(S.comments).map(Number).sort((a, b) => b - a);
+  if (!keys.length) {
+    html += '<div class="empty">下棋后，这里会逐手点评：这步棋好不好、为什么，以及更好的下法。<br>点一条点评可以回看当时的局面。<br>想学名局，点上方的“棋谱”。</div>';
+  }
+  for (const j of keys) html += commentHtml(S.comments[j]);
+  return html;
+}
+
+function studyCoachHtml() {
+  const g = sg(), mv = gameMoves(g), n = mv.length, i = T.idx;
+  const keysHtml = '<div class="keys">' + Object.keys(g.notes).map(Number).map(k =>
+    `<button data-go="${k}"${k === i ? ' class="on"' : ''}>第 ${k} 手</button>`).join('') + '</div>';
+  const lesson = g.kind === 'lesson';
+  const info = `<div class="cm game"><div class="h"><b>${esc(g.title)}</b>
+    <span class="wr">${lesson ? '套路讲解' : `${g.year} 年 · ${esc(g.result)}`}</span></div>
+    ${lesson ? '' : `<div>黑：${esc(g.black)}　白：${esc(g.white)}</div>`}
+    ${i === 0 ? `<p>${esc(g.intro)}</p><p class="note">点 ▶ 一步步看，每一手都有讲解；打开“猜棋”先自己想下一手再揭晓，是提高棋力最有效的练习。</p>` : ''}
+    ${lesson && (i === 0 || i === n) ? `<div class="key">💡 ${esc(g.use)}</div>` : ''}
+    <div class="note">${lesson ? '每一步：' : '重点手：'}</div>${keysHtml}</div>`;
+  if (i === 0) return info;
+  const b = studyBoardAt(i - 1), m = mv[i - 1], c = b.toPlay;
+  const cm = T.comments[i - 1];
+  const note = g.notes[i];
+  const who = lesson ? colorName(c) : `${colorName(c)}（${esc(c === BLACK ? g.black : g.white)}）`;
+  let h = `<div class="cm${note ? ' best' : ''}"><div class="h"><b>第 ${i} 手</b> ${who}下 ${esc(b.name(m))}
+    ${cm ? `<span class="wr">黑胜率约 ${pct(cm.blackWr)}</span>` : ''}</div>`;
+  if (note) h += `<div class="key">📖 ${esc(note)}</div>`;
+  if (T.lastGuess && T.lastGuess.at === i) {
+    h += T.lastGuess.ok
+      ? '<p>🎯 你猜中了这一手！</p>'
+      : `<p>你猜的是 ${esc(T.lastGuess.guess)}（棋盘上的蓝色 ×），实战下在 ${esc(T.lastGuess.actual)}。对比一下两手棋的区别。</p>`;
+  }
+  h += `<div class="note" style="margin-top:6px">AI 讲解：</div>${reasonsHtml(cm && cm.reasons)}`;
+  if (cm && cm.top) {
+    h += cm.top.same
+      ? '<p class="note">✨ 这手棋与本机 AI 引擎的首选一致。</p>'
+      : `<p class="note">本机 AI 引擎的首选是 ${esc(cm.top.name)}。引擎棋力远不如这些高手，这里只作对照：想一想高手为什么没有下那里。</p>`;
+  }
+  if (i === n && !lesson) h += `<p><b>终局：${esc(g.result)}</b></p>`;
+  return h + '</div>' + info;
 }
 
 function render() {
-  const g = S.game, b = S.board;
-  $('meta').textContent = `${g.size}路 · 你执${colorName(g.human)}${g.handicap >= 2 ? ` · 让${g.handicap}子` : ''} · 贴目 ${g.komi} · 第 ${b.moveCount} 手 · 提子 黑${b.capB} 白${b.capW}`;
-  let st = statusText();
-  if (S.prefs.own && !S.scoring && S.view === null) {
-    const la = latestAnalysis(S.history.length);
-    if (la) {
-      const sc = la.a.score;
-      st += `\n形势判断：${sc > 0 ? '黑' : '白'}领先约 ${Math.abs(sc).toFixed(1)} 子`;
+  const study = S.mode === 'study';
+  $('tabPlay').classList.toggle('on', !study);
+  $('tabStudy').classList.toggle('on', study);
+  $('playBar').hidden = study;
+  $('studyBar').hidden = !study;
+
+  if (study) {
+    const g = sg(), n = gameMoves(g).length;
+    const la = latestAnalysis(T.analyses, T.idx);
+    $('wrText').textContent = la ? `黑 ${pct(la.a.toPlay === BLACK ? la.a.wr : 1 - la.a.wr)}` : '';
+    let st = `${g.title}　第 ${T.idx} / ${n} 手`;
+    if (T.idx < n) st += ` · 下一手：${colorName(studyBoardAt(T.idx).toPlay)}`;
+    if (T.guess) st += ` · 猜棋 ${T.hit}/${T.tried}`;
+    $('status').textContent = st;
+    $('selGame').value = String(T.gi);
+    $('rngMove').max = String(n);
+    $('rngMove').value = String(T.idx);
+    $('btnFirst').disabled = $('btnPrev').disabled = T.idx === 0;
+    $('btnNext').disabled = $('btnLast').disabled = T.idx >= n;
+    $('btnAuto').classList.toggle('on', !!T.auto);
+    $('btnAuto').textContent = T.auto ? '暂停' : '自动';
+    $('btnGuess').classList.toggle('on', T.guess);
+    $('coach').innerHTML = studyCoachHtml();
+    $('viewBanner').hidden = true;
+  } else {
+    const hw = humanWr();
+    $('wrText').textContent = hw === null ? '' : `你 ${pct(hw)}`;
+    $('status').textContent = statusText();
+    const my = canHumanMove();
+    $('btnUndo').disabled = !S.history.length;
+    $('btnPass').disabled = !my;
+    $('btnHint').disabled = !my;
+    $('btnResign').disabled = $('btnResign2').disabled = !!(S.result || S.scoring);
+    $('btnOwn').classList.toggle('on', S.prefs.own);
+    for (const [a, b, key] of [['chkCoach', 'chkCoach2', 'coach'], ['chkCands', 'chkCands2', 'cands'], ['chkConfirm', 'chkConfirm2', 'confirm']]) {
+      $(a).checked = $(b).checked = S.prefs[key];
     }
+    $('viewBanner').hidden = S.view === null;
+    if (S.view !== null) $('viewText').textContent = `第 ${S.view + 1} 手之前 · 红圈=实战 · 数字=AI 推荐（胜率%）`;
+    $('coach').innerHTML = playCoachHtml();
   }
-  $('status').textContent = st;
-
-  const la = latestAnalysis(S.history.length);
-  const hw = la ? humanWrAt(la.k) : 0.5;
-  $('wrYou').style.width = pct(hw);
-  $('wrYouLabel').textContent = `你 ${pct(hw)}`;
-  $('wrAiLabel').textContent = `AI ${pct(1 - hw)}`;
-
-  const my = canHumanMove();
-  $('btnUndo').disabled = !S.history.length;
-  $('btnPass').disabled = !my;
-  $('btnHint').disabled = !my;
-  $('btnResign').disabled = !!(S.result || S.scoring);
-  $('btnOwn').classList.toggle('on', S.prefs.own);
-
-  $('selLevel').value = String(S.prefs.level);
-  $('selLevel').disabled = S.prefs.target < 100;
-  $('rngTarget').value = String(S.prefs.target);
-  $('targetText').textContent = S.prefs.target >= 100 ? '全力' : `AI≈${S.prefs.target}%`;
-  $('targetNote').textContent = S.prefs.target >= 100
-    ? '拖动滑块可以让 AI 放水：AI 会挑选让自己胜率接近设定值的下法。'
-    : `让棋模式：AI 会尽量把自己的胜率保持在 ${S.prefs.target}% 左右（数值越低越让着你）。`;
-  $('chkCoach').checked = S.prefs.coach;
-  $('chkCands').checked = S.prefs.cands;
-  $('chkConfirm').checked = S.prefs.confirm;
-
-  const banner = $('viewBanner');
-  banner.hidden = S.view === null;
-  if (S.view !== null) $('viewText').textContent = `第 ${S.view + 1} 手之前 · 红圈=实战 · 数字=AI 推荐（你的胜率%）`;
-
-  renderCoach();
   drawBoard();
-  drawGraph();
 }
 
 // ---------------- 对话框与提示 ----------------
@@ -882,75 +1074,143 @@ function showMessage(title, text, withNewGame, buttons) {
   dlg.showModal();
 }
 
+const dlgNew = $('dlgNew'), fNew = dlgNew.querySelector('form');
+
 function fillHandicap(size, value) {
-  const sel = $('dlgNew').querySelector('[name=handicap]');
   const max = size === 9 ? 5 : 9;
-  sel.innerHTML = '<option value="0">不让子</option>' +
+  fNew.handicap.innerHTML = '<option value="0">不让子</option>' +
     Array.from({ length: max - 1 }, (_, i) => `<option value="${i + 2}">让 ${i + 2} 子</option>`).join('');
-  sel.value = String(Math.min(value, max) >= 2 ? Math.min(value, max) : 0);
+  const v = Math.min(value, max);
+  fNew.handicap.value = String(v >= 2 ? v : 0);
+}
+
+function showTarget() {
+  const t = +fNew.target.value;
+  $('targetText').textContent = t >= 100 ? '全力' : `AI≈${t}%`;
 }
 
 function openNewGame() {
-  const dlg = $('dlgNew'), f = dlg.querySelector('form');
-  f.size.value = String(S.game.size);
-  f.human.value = String(S.game.human);
+  fNew.size.value = String(S.game.size);
+  fNew.human.value = String(S.game.human);
   fillHandicap(S.game.size, S.game.handicap);
-  f.komi.value = S.game.komiAuto === false ? String(S.game.komi) : 'auto';
-  dlg.returnValue = '';
-  dlg.showModal();
+  fNew.komi.value = S.game.komiAuto === false ? String(S.game.komi) : 'auto';
+  fNew.level.value = String(S.prefs.level);
+  fNew.target.value = String(S.prefs.target);
+  showTarget();
+  dlgNew.returnValue = '';
+  dlgNew.showModal();
 }
 
-$('dlgNew').querySelector('[name=size]').addEventListener('change', e => {
-  fillHandicap(+e.target.value, +$('dlgNew').querySelector('[name=handicap]').value);
-});
+fNew.level.innerHTML = LEVELS.map((l, i) => `<option value="${i}">${l.name}${i === 0 ? '（适合新手）' : i === 4 ? '（思考较久）' : ''}</option>`).join('');
+fNew.size.addEventListener('change', () => fillHandicap(+fNew.size.value, +fNew.handicap.value));
+fNew.target.addEventListener('input', showTarget);
+$('versionText').textContent = `版本 ${APP_VERSION}`;
 
-$('dlgNew').addEventListener('close', () => {
-  const dlg = $('dlgNew'), f = dlg.querySelector('form');
-  if (dlg.returnValue !== 'ok') return;
-  const size = +f.size.value, handicap = +f.handicap.value;
-  const auto = f.komi.value === 'auto';
+dlgNew.addEventListener('close', () => {
+  const rv = dlgNew.returnValue;
+  if (rv !== 'ok' && rv !== 'apply') return;
+  S.prefs.level = +fNew.level.value;
+  S.prefs.target = +fNew.target.value;
+  if (rv === 'apply') {
+    save();
+    render();
+    toast('AI 设置已更新，从下一手开始生效');
+    return;
+  }
+  const handicap = +fNew.handicap.value, auto = fNew.komi.value === 'auto';
   newGame({
-    size, human: +f.human.value, handicap,
-    komi: auto ? (handicap >= 2 ? 0.5 : 7.5) : +f.komi.value,
+    size: +fNew.size.value, human: +fNew.human.value, handicap,
+    komi: auto ? (handicap >= 2 ? 0.5 : 7.5) : +fNew.komi.value,
     komiAuto: auto,
   });
 });
 
+$('dlgMore').addEventListener('close', () => {
+  if ($('dlgMore').returnValue === 'resign') resign();
+});
+
 // ---------------- 绑定 ----------------
 
-$('selLevel').innerHTML = LEVELS.map((l, i) => `<option value="${i}">${l.name}</option>`).join('');
+$('tabPlay').addEventListener('click', () => setMode('play'));
+$('tabStudy').addEventListener('click', () => setMode('study'));
 $('btnNew').addEventListener('click', openNewGame);
 $('btnUndo').addEventListener('click', undo);
 $('btnPass').addEventListener('click', humanPass);
 $('btnHint').addEventListener('click', showHint);
 $('btnResign').addEventListener('click', resign);
+$('btnMore').addEventListener('click', () => { $('dlgMore').returnValue = ''; $('dlgMore').showModal(); });
 $('btnOwn').addEventListener('click', () => { S.prefs.own = !S.prefs.own; save(); render(); });
 $('btnBackLive').addEventListener('click', () => { S.view = null; render(); });
-$('selLevel').addEventListener('change', e => { S.prefs.level = +e.target.value; save(); render(); });
-$('rngTarget').addEventListener('input', e => { S.prefs.target = +e.target.value; save(); render(); });
-$('chkCoach').addEventListener('change', e => {
-  S.prefs.coach = e.target.checked;
-  save();
+
+function bindPref(ids, key, after) {
+  for (const id of ids) {
+    $(id).addEventListener('change', e => {
+      S.prefs[key] = e.target.checked;
+      if (after) after();
+      save();
+      render();
+    });
+  }
+}
+bindPref(['chkCoach', 'chkCoach2'], 'coach', () => {
   if (S.prefs.coach) S.analyses.forEach((a, k) => a && makeComment(k));
-  render();
 });
-$('chkCands').addEventListener('change', e => { S.prefs.cands = e.target.checked; save(); render(); });
-$('chkConfirm').addEventListener('change', e => { S.prefs.confirm = e.target.checked; S.pendingTap = NONE; save(); render(); });
+bindPref(['chkCands', 'chkCands2'], 'cands');
+bindPref(['chkConfirm', 'chkConfirm2'], 'confirm', () => { S.pendingTap = NONE; });
+
 $('coach').addEventListener('click', e => {
+  const go = e.target.closest('[data-go]');
+  if (go) { stopAuto(); studyGo(+go.dataset.go); return; }
   const el = e.target.closest('[data-j]');
   if (el) openReview(+el.dataset.j);
+});
+
+$('selGame').innerHTML =
+  `<optgroup label="套路讲解（入门必学）">${GAMES.map((g, i) => g.kind === 'lesson' ? `<option value="${i}">${esc(g.title)}</option>` : '').join('')}</optgroup>` +
+  `<optgroup label="经典名局">${GAMES.map((g, i) => g.kind !== 'lesson' ? `<option value="${i}">${esc(g.title)}（${g.year}，${esc(g.black)} vs ${esc(g.white)}）</option>` : '').join('')}</optgroup>`;
+$('selGame').addEventListener('change', e => selectGame(+e.target.value));
+$('btnFirst').addEventListener('click', () => { stopAuto(); studyGo(0); });
+$('btnPrev').addEventListener('click', () => { stopAuto(); studyGo(T.idx - 1); });
+$('btnNext').addEventListener('click', () => studyGo(T.idx + 1));
+$('btnLast').addEventListener('click', () => { stopAuto(); studyGo(gameMoves(sg()).length); });
+$('btnAuto').addEventListener('click', toggleAuto);
+$('btnGuess').addEventListener('click', () => {
+  T.guess = !T.guess;
+  toast(T.guess ? '猜棋：在棋盘上点你认为的下一手' : '已关闭猜棋');
+  render();
+});
+$('rngMove').addEventListener('input', e => { T.idx = +e.target.value; render(); });
+$('rngMove').addEventListener('change', e => { stopAuto(); studyGo(+e.target.value); });
+
+addEventListener('keydown', e => {
+  if (S.mode !== 'study' || document.querySelector('dialog[open]')) return;
+  if (e.key === 'ArrowRight') studyGo(T.idx + 1);
+  else if (e.key === 'ArrowLeft') { stopAuto(); studyGo(T.idx - 1); }
 });
 
 let resizeTimer = 0;
 addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(layout, 80); });
 
-if ('serviceWorker' in navigator && !/WeiqiApp/.test(navigator.userAgent) &&
-    location.protocol === 'https:') {
-  navigator.serviceWorker.register('sw.js').catch(() => {});
+// ---------------- 离线与更新 ----------------
+
+if ('serviceWorker' in navigator && !/WeiqiApp/.test(navigator.userAgent) && location.protocol === 'https:') {
+  let hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (hadController) $('updateBar').hidden = false;
+    hadController = true;
+  });
+  navigator.serviceWorker.register('sw.js').then(reg => {
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') reg.update().catch(() => {});
+    });
+  }).catch(() => {});
 }
+$('btnReload').addEventListener('click', () => location.reload());
+$('btnHelp').addEventListener('click', () => $('dlgHelp').showModal());
 
 load();
 layout();
 render();
-if (!S.result && S.board.passes >= 2) startScoring();
+if (S.mode === 'study') studyGo(T.idx);
+else if (!S.result && S.board.passes >= 2) startScoring();
 else advance();

@@ -62,6 +62,13 @@ function goEngine(root) {
       if (points.length) this.toPlay = WHITE;
     }
 
+    /** 摆好黑白预置子（如古代座子），并指定谁先走。 */
+    setupStones(black, white, toPlay) {
+      for (const p of black) this.b[p] = BLACK;
+      for (const p of white) this.b[p] = WHITE;
+      this.toPlay = toPlay;
+    }
+
     pt(x, y) { return (y + 1) * this.w + x + 1; }
     x(p) { return p % this.w - 1; }
     y(p) { return ((p / this.w) | 0) - 1; }

@@ -17,6 +17,16 @@
 </head>
 <body>
 <div id="app">
+  <header id="top">
+    <h1>围棋对战教练</h1>
+    <div class="tabs" role="tablist">
+      <button id="tabPlay" role="tab">对战</button>
+      <button id="tabStudy" role="tab">棋谱</button>
+    </div>
+    <b id="wrText"></b>
+    <button id="btnHelp" class="small" aria-label="使用说明">？</button>
+  </header>
+
   <section id="boardWrap">
     <canvas id="board" aria-label="棋盘"></canvas>
     <div id="viewBanner" hidden>
@@ -26,51 +36,45 @@
   </section>
 
   <aside id="side">
-    <header>
-      <h1>围棋对战教练</h1>
-      <div id="meta"></div>
-    </header>
-
     <div id="status"></div>
 
-    <div class="card" id="wrCard">
-      <div class="wr-labels"><span id="wrYouLabel">你</span><span id="wrAiLabel">AI</span></div>
-      <div class="wrbar"><div id="wrYou"></div></div>
-      <canvas id="graph" aria-label="胜率曲线"></canvas>
-    </div>
-
-    <div id="controls">
+    <!-- 对战工具栏 -->
+    <div id="playBar" class="bar">
       <button id="btnNew">新局</button>
       <button id="btnUndo">悔棋</button>
       <button id="btnPass">停一手</button>
       <button id="btnHint" class="primary">提示</button>
       <button id="btnOwn">形势</button>
-      <button id="btnResign">认输</button>
+      <button id="btnResign" class="wide-only">认输</button>
+      <label class="chip wide-only"><input type="checkbox" id="chkCoach">讲解</label>
+      <label class="chip wide-only"><input type="checkbox" id="chkCands">推荐点</label>
+      <label class="chip wide-only"><input type="checkbox" id="chkConfirm">确认落子</label>
+      <button id="btnMore" class="narrow-only" aria-label="更多">⋯</button>
     </div>
 
-    <div class="card" id="aiCard">
-      <label class="row">AI 难度
-        <select id="selLevel"></select>
-      </label>
-      <label class="row">AI 胜率控制
-        <input id="rngTarget" type="range" min="20" max="100" step="5">
-        <b id="targetText"></b>
-      </label>
-      <p class="note" id="targetNote"></p>
-      <div class="toggles">
-        <label><input type="checkbox" id="chkCoach"> 讲解每一手</label>
-        <label><input type="checkbox" id="chkCands"> 显示 AI 推荐点</label>
-        <label><input type="checkbox" id="chkConfirm"> 点两次确认落子</label>
-      </div>
+    <!-- 棋谱工具栏 -->
+    <div id="studyBar" class="bar" hidden>
+      <select id="selGame"></select>
+      <button id="btnFirst" aria-label="第一手">⏮</button>
+      <button id="btnPrev" aria-label="上一手">◀</button>
+      <button id="btnNext" class="primary" aria-label="下一手">▶</button>
+      <button id="btnLast" aria-label="最后一手">⏭</button>
+      <button id="btnAuto">自动</button>
+      <button id="btnGuess">猜棋</button>
+      <input id="rngMove" type="range" min="0" value="0" aria-label="跳到第几手">
     </div>
 
     <div id="coach"></div>
   </aside>
 </div>
 
+<div id="updateBar" hidden>
+  新版本已下载好 <button id="btnReload" class="small primary">立即更新</button>
+</div>
+
 <dialog id="dlgNew">
   <form method="dialog">
-    <h2>新对局</h2>
+    <h2>对局设置</h2>
     <label class="row">棋盘
       <select name="size">
         <option value="9">9 路（推荐入门）</option>
@@ -84,9 +88,7 @@
         <option value="2">白棋（后行）</option>
       </select>
     </label>
-    <label class="row">让子
-      <select name="handicap"></select>
-    </label>
+    <label class="row">让子 <select name="handicap"></select></label>
     <label class="row">贴目
       <select name="komi">
         <option value="auto">自动（让子 0.5，否则 7.5）</option>
@@ -97,11 +99,63 @@
         <option value="0.5">0.5</option>
       </select>
     </label>
-    <p class="note">让子：执黑的一方先在星位摆好几个子，是水平有差距时最常用的办法。</p>
+    <label class="row">AI 难度 <select name="level"></select></label>
+    <label class="row">AI 胜率控制
+      <input name="target" type="range" min="20" max="100" step="5">
+      <b id="targetText"></b>
+    </label>
+    <p class="note">胜率控制：100 = AI 全力下；调低后 AI 会挑选让自己胜率接近设定值的下法（越低越让着你）。</p>
     <menu>
       <button value="cancel">取消</button>
-      <button value="ok" class="primary">开始</button>
+      <button value="apply">只改 AI 设置</button>
+      <button value="ok" class="primary">开始新局</button>
     </menu>
+    <p class="note version" id="versionText"></p>
+  </form>
+</dialog>
+
+<dialog id="dlgMore">
+  <form method="dialog">
+    <h2>更多</h2>
+    <div class="more-list">
+      <label class="chip"><input type="checkbox" id="chkCoach2">讲解每一手</label>
+      <label class="chip"><input type="checkbox" id="chkCands2">显示 AI 推荐点</label>
+      <label class="chip"><input type="checkbox" id="chkConfirm2">点两次确认落子</label>
+    </div>
+    <menu>
+      <button value="resign" id="btnResign2">认输</button>
+      <button value="close" class="primary">关闭</button>
+    </menu>
+  </form>
+</dialog>
+
+<dialog id="dlgHelp">
+  <form method="dialog">
+    <h2>使用说明</h2>
+    <div class="help">
+      <h3>对战</h3>
+      <ul>
+        <li><b>落子</b>：手指按住棋盘会出现半透明的预览子和蓝色十字线，松开即落子。怕点错可以勾选“确认落子”（手机在“⋯”里），点两次才落子。</li>
+        <li><b>讲解</b>：每下一手，下方会出现点评——这手是 最佳 / 好棋 / 可以 / 缓手 / 恶手，原因是什么；下得不好时还会告诉你“更好的是哪里、为什么”。点任意一条点评可以回到当时的局面复盘。</li>
+        <li><b>提示</b>：告诉你推荐下在哪里、为什么，棋盘上的数字是走那里之后的胜率。</li>
+        <li><b>形势</b>：在棋盘上显示双方大致的地盘（黑方块 / 白方块），并估算谁领先几子。</li>
+        <li><b>悔棋</b>：退回到你的上一手。</li>
+        <li><b>停一手</b>：双方都没有好地方下时才停。双方连续停一手就终局数子，数子时点棋子可以切换死活。</li>
+        <li><b>新局</b>：选择棋盘（建议从 9 路开始）、执黑执白、让子、贴目、AI 难度，以及“AI 胜率控制”——调低后 AI 会故意放水，让比赛更有来有回。只想改难度不想重开，就点“只改 AI 设置”。</li>
+      </ul>
+      <h3>棋谱</h3>
+      <ul>
+        <li><b>套路讲解</b>：双叫吃、征子、倒扑、打劫、布局次序等入门必学的手段，每一步都有说明，最后告诉你“实战中怎么用”。</li>
+        <li><b>经典名局</b>：耳赤之局、吴清源“三三·星·天元”、AlphaGo 第 37 手、李世石“神之一手”、当湖十局。重点手有专门的讲解，点“第 N 手”按钮可以直接跳过去。</li>
+        <li><b>▶ / ◀</b>：一步步前进后退；拖动滑块可以快速跳转；电脑上也可以用键盘左右方向键。<b>自动</b>：每 3.5 秒走一步。</li>
+        <li><b>猜棋</b>：打开后，先在棋盘上点你认为的下一手，再揭晓答案。猜错的位置会用蓝色 × 标出。这是提高棋力最有效的练习方法。</li>
+      </ul>
+      <h3>关于 AI</h3>
+      <p>AI 是内置在程序里的围棋引擎（蒙特卡洛树搜索），完全离线运行，不联网，也不调用大模型。它大约是业余棋手的水平，讲解是根据胜率和地盘变化自动生成的，复杂的局面仅供参考。</p>
+      <h3>在 iPad 上更新</h3>
+      <p>联网时打开本应用，有新版本会在底部提示“新版本已下载好”，点“立即更新”即可。</p>
+    </div>
+    <menu><button value="close" class="primary">知道了</button></menu>
   </form>
 </dialog>
 
@@ -116,6 +170,7 @@
 <div id="toast" hidden></div>
 
 <script src="engine.js"></script>
+<script src="games.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
