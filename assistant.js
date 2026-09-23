@@ -54,6 +54,11 @@ function assistantContext() {
   return { ...c, a: la ? la.a : null, lastMove, lastComment };
 }
 
+/** 问题问的是哪一方：“对方/AI/白棋/黑棋”，否则是自己 */
+function askedColor(ctx, q) {
+  return /对方|AI|电脑|白棋|白子|它/.test(q) && S.mode === 'play' ? 3 - ctx.me : /白/.test(q) ? WHITE : /黑/.test(q) ? BLACK : ctx.me;
+}
+
 /** 从问题里判断问的是哪块棋：优先坐标，其次“对方/白棋/黑棋”，否则是自己最近下的那块。 */
 function targetGroup(ctx, q) {
   const b = ctx.b;
@@ -73,7 +78,26 @@ const INTENTS = [
   {
     test: q => /气/.test(q) && !/(天气|生气|气氛)/.test(q),
     run(ctx, q) {
-      const b = ctx.b, g = targetGroup(ctx, q);
+      const b = ctx.b;
+      // 没有指定坐标、也没说“这块/刚才”：列出这一方所有棋块的气
+      const specific = coordsIn(q, b).some(p => b.b[p] === BLACK || b.b[p] === WHITE) || /这块|这个子|这颗|这一块|刚才|刚下|那块|最后/.test(q);
+      if (!specific) {
+        const color = askedColor(ctx, q);
+        const gs = allGroups(b).filter(x => x.color === color)
+          .sort((x, y) => x.libs.length - y.libs.length || y.stones.length - x.stones.length);
+        if (!gs.length) return { html: `<p>${whoName(color)}在棋盘上还没有棋子。</p>` };
+        const all = [];
+        for (const x of gs) for (const l of x.libs) if (!all.includes(l)) all.push(l);
+        Q.mark = all;
+        Q.area = null;
+        const warn = n => (n === 1 ? ' <b style="color:var(--bad)">只剩 1 口气，正被叫吃！</b>' : n === 2 ? ' <b style="color:var(--warn)">只有 2 口气，比较危险。</b>' : n >= 4 ? ' 暂时安全。' : '');
+        const items = gs.map(x => `<li><b>${esc(names(b, x.stones, 6))}</b>（${x.stones.length} 子）：<b>${x.libs.length} 口气</b>——${esc(names(b, x.libs))}。${warn(x.libs.length)}</li>`).join('');
+        return {
+          html: `<p>${whoName(color)}现在有 <b>${gs.length} 块棋</b>，一共 ${all.length} 口气（棋盘上的蓝圈，两块棋共用的气只画一次）：</p><ul>${items}</ul>
+            <p class="note">气 = 棋块上下左右相邻的空点。只有上下左右连着的棋子才算一块，斜着相邻的是两块棋，各算各的气。想只看某一块，就在问题里写坐标，例如“D4 有几口气”。</p>`,
+        };
+      }
+      const g = targetGroup(ctx, q);
       if (!g) return { html: '<p>棋盘上还没有棋子。</p>' };
       const c = b.b[g.stones[0]];
       Q.mark = g.libs.slice();

@@ -2,7 +2,7 @@
 /* 围棋对战教练：对战、学习（课程与名局）、练习、提问。
  * 引擎在 engine.js；蒙特卡洛计算在 Web Worker 里进行，局部死活计算在主线程（很快）。 */
 
-const APP_VERSION = '3.0';
+const APP_VERSION = '3.1';
 const G = window.Go;
 const { EMPTY, BLACK, WHITE, PASS, NONE, RESIGN } = G;
 const GAMES = window.GAMES || [];
@@ -1769,7 +1769,7 @@ function drawBoard() {
   const X = p => org + b.x(p) * cell, Y = p => org + b.y(p) * cell;
 
   const bg = ctx.createLinearGradient(0, 0, s, s);
-  bg.addColorStop(0, '#e9c27c'); bg.addColorStop(1, '#d6a65b');
+  if (isDark()) { bg.addColorStop(0, '#a88450'); bg.addColorStop(1, '#8e6c3c'); } else { bg.addColorStop(0, '#e9c27c'); bg.addColorStop(1, '#d6a65b'); }
   ctx.fillStyle = bg;
   ctx.fillRect(0, 0, s, s);
 
@@ -2334,8 +2334,9 @@ function askShow(q, html, src, isPending) {
   else Q.log.push({ q, html, src, pending });
   if (Q.log.length > 30) Q.log.shift();
   const box = $('askAnswer');
-  box.innerHTML = Q.log.map(m => `<div class="chat-q">${esc(m.q)}</div><div class="chat-a">${m.html}${m.src ? `<div class="note src">${esc(m.src)}</div>` : ''}</div>`).join('');
-  box.scrollTop = box.scrollHeight;
+  // 只显示最新的一问一答（之前的问答仍留在 Q.log 里，给大模型当上下文）
+  box.innerHTML = Q.log.slice(-1).map(m => `<div class="chat-q">${esc(m.q)}</div><div class="chat-a">${m.html}${m.src ? `<div class="note src">${esc(m.src)}</div>` : ''}</div>`).join('');
+  box.scrollTop = 0;
 }
 
 function openAsk(open) {
@@ -2810,6 +2811,22 @@ if ('serviceWorker' in navigator && !/WeiqiApp/.test(navigator.userAgent) && loc
   }).catch(() => {});
 }
 $('btnReload').addEventListener('click', () => location.reload());
+
+// ---------------- 白天 / 夜晚 ----------------
+function isDark() { return document.documentElement.dataset.theme === 'dark'; }
+function applyTheme(t) {
+  document.documentElement.dataset.theme = t;
+  const m = document.querySelector('meta[name="theme-color"]');
+  if (m) m.content = t === 'dark' ? '#1b1814' : '#f4ebdd';
+}
+applyTheme(isDark() ? 'dark' : 'light');
+$('btnTheme').addEventListener('click', () => {
+  const t = isDark() ? 'light' : 'dark';
+  applyTheme(t);
+  try { localStorage.setItem('weiqi-theme', t); } catch (e) { /* 忽略 */ }
+  render();
+  toast(t === 'dark' ? '夜晚模式' : '白天模式');
+});
 $('fileImport').addEventListener('change', e => { if (e.target.files[0]) importRecords(e.target.files[0]); e.target.value = ''; });
 
 // ---------------- 启动 ----------------
