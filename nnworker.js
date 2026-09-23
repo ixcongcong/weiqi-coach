@@ -1,24 +1,65 @@
 /* 神经网络 Worker：加载 ONNX 网络（onnxruntime-web，WebAssembly），做 PUCT 搜索和单次评估。
  * 所有文件都在本机缓存，离线可用。任务按顺序执行；收到 cancel 就放弃排队中和进行中的任务。 */
-importScripts('engine.js', 'nn.js', 'ort/ort.wasm.min.js');
+importScripts('engine.js', 'nn.js');
 goEngine(self);
 goNN(self);
 
 const NN = self.NN, Go = self.Go;
-let session = null, evaluator = null, search = null, modelName = '', threads = 1;
+let session = null, evaluator = null, search = null, modelName = '', threads = 1, backend = 'wasm', ortKind = '';
 let gen = 0, chain = Promise.resolve();
 
-ort.env.wasm.wasmPaths = new URL('ort/', self.location.href).href;
-ort.env.wasm.proxy = false;
+/** 选运行库：大网络在支持 WebGPU 的设备上用显卡，否则用 CPU（WebAssembly 多线程） */
+function loadOrt(kind) {
+  if (!ortKind) {
+    importScripts(kind === 'webgpu' ? 'ort/ort.webgpu.min.js' : 'ort/ort.wasm.min.js');
+    ortKind = kind;
+    ort.env.wasm.wasmPaths = new URL('ort/', self.location.href).href;
+    ort.env.wasm.proxy = false;
+  }
+  return ortKind;
+}
 
-async function load(name) {
+/** 下载网络，边下载边报告进度（大网络第一次要下载近 100 MB） */
+async function download(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`下载网络失败（${res.status}）`);
+  const total = +res.headers.get('Content-Length') || 0;
+  if (!res.body || !total) return res.arrayBuffer();
+  const reader = res.body.getReader(), parts = [];
+  let got = 0, lastPct = -1;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    parts.push(value);
+    got += value.length;
+    const pct = Math.min(99, Math.floor(got / total * 100));
+    if (pct !== lastPct && pct % 5 === 0) { lastPct = pct; self.postMessage({ type: 'progress', pct }); }
+  }
+  const buf = new Uint8Array(got);
+  let off = 0;
+  for (const part of parts) { buf.set(part, off); off += part.length; }
+  return buf.buffer;
+}
+
+async function load(name, wantGpu) {
   const t0 = Date.now();
+  let adapter = null;
+  if (wantGpu && self.navigator && navigator.gpu) {
+    try { adapter = await navigator.gpu.requestAdapter(); } catch (e) { adapter = null; }
+  }
+  const kind = loadOrt(adapter ? 'webgpu' : 'wasm');
+  // 实测超过 4 线程反而变慢
   threads = self.crossOriginIsolated ? Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 2) - 1)) : 1;
   ort.env.wasm.numThreads = threads;
-  const res = await fetch(`models/${name}.onnx`);
-  if (!res.ok) throw new Error(`下载网络失败（${res.status}）`);
-  const buf = await res.arrayBuffer();
-  session = await ort.InferenceSession.create(buf, { executionProviders: ['wasm'], graphOptimizationLevel: 'all' });
+  const buf = await download(`models/${name}.onnx`);
+  backend = 'wasm';
+  if (kind === 'webgpu' && adapter) {
+    try {
+      session = await ort.InferenceSession.create(buf, { executionProviders: ['webgpu'], graphOptimizationLevel: 'all' });
+      backend = 'webgpu';
+    } catch (e) { session = null; }
+  }
+  if (!session) session = await ort.InferenceSession.create(buf, { executionProviders: ['wasm'], graphOptimizationLevel: 'all' });
   modelName = name;
   evaluator = new NN.Evaluator(async (sp, gl, B, n) => {
     const o = await session.run({
@@ -57,15 +98,15 @@ async function doEval(m) {
 
 async function doSearch(m, myGen) {
   const bd = boardOf(m.state);
-  const batch = bd.n <= 9 ? 8 : bd.n <= 13 ? 6 : 4;
+  const batch = backend === 'webgpu' ? (bd.n <= 9 ? 16 : bd.n <= 13 ? 12 : 8) : bd.n <= 9 ? 8 : bd.n <= 13 ? 6 : 4;
   return search.run(bd, m.komi, { visits: m.visits, ms: m.ms, batch, stop: () => myGen !== gen });
 }
 
 self.onmessage = e => {
   const m = e.data;
   if (m.type === 'init') {
-    chain = chain.then(() => load(m.model))
-      .then(r => self.postMessage({ type: 'ready', model: modelName, threads, ...r }))
+    chain = chain.then(() => load(m.model, m.gpu))
+      .then(r => self.postMessage({ type: 'ready', model: modelName, threads, backend, ...r }))
       .catch(err => self.postMessage({ type: 'error', msg: String(err && err.message || err) }));
     return;
   }
