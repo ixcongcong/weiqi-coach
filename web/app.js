@@ -2,7 +2,7 @@
 /* 围棋对战教练：对战、学习（课程与名局）、练习、提问。
  * 引擎在 engine.js；蒙特卡洛计算在 Web Worker 里进行，局部死活计算在主线程（很快）。 */
 
-const APP_VERSION = '2.6';
+const APP_VERSION = '2.7';
 const G = window.Go;
 const { EMPTY, BLACK, WHITE, PASS, NONE, RESIGN } = G;
 const GAMES = window.GAMES || [];
@@ -170,8 +170,9 @@ const pool = new Pool();
 
 const S = {
   mode: 'play',
-  game: { size: 9, human: BLACK, handicap: 0, komi: 7.5, rule: 'normal', captureN: 1 },
-  prefs: { level: 0, target: 100, coach: true, confirm: false, cands: false, own: false, helper: true },
+  game: { size: 9, human: BLACK, handicap: 0, komi: 7.5, rule: 'normal', captureN: 1, opp: 'ai' },
+  prefs: { level: 0, target: 100, coach: true, confirm: false, cands: false, own: false, helper: true, marks: true },
+  summary: null,
   setup: [],
   history: [],
   result: null,
@@ -280,9 +281,16 @@ function truncate(len) {
   for (const j of Object.keys(S.comments)) if (+j >= len) delete S.comments[j];
 }
 
+/** 真人对战：两个人在同一台设备上轮流下，其它功能不变。 */
+const pvp = () => S.game.opp === 'human';
+const isHumanTurn = () => pvp() || S.board.toPlay === S.game.human;
+/** 讲解、提示、提问的视角：对 AI 时是“你”，真人对战时是轮到下棋的一方。 */
+const perspective = () => (pvp() ? S.board.toPlay : S.game.human);
+const sideName = c => (pvp() ? `${colorName(c)}方` : c === S.game.human ? '你' : 'AI');
+
 function canHumanMove() {
   return S.mode === 'play' && !S.result && !S.scoring && !S.scoringBusy && S.view === null &&
-    S.board.toPlay === S.game.human && !S.aiThinking;
+    isHumanTurn() && !S.aiThinking;
 }
 
 // ---------------- 对战：分析与流程 ----------------
@@ -325,14 +333,14 @@ async function step() {
   while (gen === S.gen && S.mode === 'play' && !S.result && !S.scoring && !S.scoringBusy) {
     const k = S.history.length;
     if (captureRule()) {
-      if (S.board.toPlay === S.game.human) return;
+      if (isHumanTurn()) return;
       await captureTurn(gen);
       continue;
     }
     const a = await getAnalysis(k);
     if (gen !== S.gen || !a) return;
     if (S.history.length !== k) continue;
-    if (S.board.toPlay === S.game.human) return;
+    if (isHumanTurn()) return;
     await aiTurn(gen, k);
   }
 }
@@ -403,8 +411,7 @@ async function aiTurn(gen, k) {
     S.result = { text: 'AI 认输，你赢了！', winner: S.game.human };
     recordGame();
     save();
-    render();
-    showMessage('对局结束', 'AI 认输，你赢了！', true);
+    finishGame('AI 认输，你赢了！');
     return;
   }
   if (move === PASS) toast('AI 停一手');
@@ -427,11 +434,11 @@ function checkCaptureWin() {
   const b = S.board, n = S.game.captureN;
   const w = b.capB >= n ? BLACK : b.capW >= n ? WHITE : 0;
   if (!w) return false;
-  const you = w === S.game.human;
-  S.result = { text: you ? `你先吃到 ${n} 个子，你赢了！` : `AI 先吃到 ${n} 个子，AI 赢了`, winner: w };
+  const you = pvp() || w === S.game.human;
+  S.result = { text: pvp() ? `${colorName(w)}方先吃到 ${n} 个子，${colorName(w)}方赢了！` : you ? `你先吃到 ${n} 个子，你赢了！` : `AI 先吃到 ${n} 个子，AI 赢了`, winner: w };
   recordGame();
   save();
-  setTimeout(() => showMessage('吃子棋结束', `${S.result.text}\n\n${you ? '很好！试试把“先吃到几个子”调高一点。' : '点“回看”看看是哪一步被叫吃了，想一想怎么逃。'}`, true), 300);
+  setTimeout(() => finishGame(`${S.result.text}\n\n${pvp() ? '' : you ? '很好！试试把“先吃到几个子”调高一点。' : '点“回看”看看是哪一步被叫吃了，想一想怎么逃。'}`, '吃子棋结束'), 300);
   return true;
 }
 
@@ -446,6 +453,14 @@ function atariGroups(b, color) {
   return out;
 }
 
+/** 新手辅助：对方刚下完，轮到的一方有棋子被叫吃时提醒。 */
+function warnAtari(mover) {
+  if (!S.prefs.helper || (!pvp() && mover === S.game.human)) return;
+  const who = pvp() ? S.board.toPlay : S.game.human;
+  const at = atariGroups(S.board, who);
+  if (at.length) toast(`注意：${pvp() ? colorName(who) + '方' : '你'}的 ${at.reduce((n, g) => n + g.stones.length, 0)} 个子被叫吃了（红圈）`);
+}
+
 function playMove(m, internal) {
   const mover = S.board.toPlay;
   if (!S.board.play(m)) return false;
@@ -457,16 +472,10 @@ function playMove(m, internal) {
   save();
   if (captureRule()) {
     captureComment(S.history.length - 1);
-    if (!checkCaptureWin() && S.prefs.helper && mover !== S.game.human) {
-      const at = atariGroups(S.board, S.game.human);
-      if (at.length) toast(`注意：你的 ${at.reduce((n, g) => n + g.stones.length, 0)} 个子被叫吃了（红圈）！`);
-    }
+    if (!checkCaptureWin()) warnAtari(mover);
   } else {
     if (S.board.passes >= 2) startScoring();
-    else if (S.prefs.helper && mover !== S.game.human) {
-      const at = atariGroups(S.board, S.game.human);
-      if (at.length) toast(`注意：你的 ${at.reduce((n, g) => n + g.stones.length, 0)} 个子被叫吃了（红圈）`);
-    }
+    else warnAtari(mover);
   }
   render();
   if (!internal) advance();
@@ -484,7 +493,7 @@ async function startScoring() {
   recordGame();
   render();
   const won = S.scoring.winner() === S.game.human;
-  showMessage('对局结束', `${scoreText()}\n\n${won ? '你赢了！' : 'AI 获胜'}\n\n如果死活判断有误，可以点棋盘上的棋子切换死活。`, true);
+  finishGame(`${scoreText()}\n\n${pvp() ? `${colorName(S.scoring.winner())}方获胜` : won ? '你赢了！' : 'AI 获胜'}\n\n如果死活判断有误，可以点棋盘上的棋子切换死活。`);
 }
 
 function scoreText() {
@@ -507,7 +516,7 @@ async function makeComment(j) {
   const A = S.analyses[j], B = S.analyses[j + 1];
   if (!A || !B || S.comments[j] || j >= S.history.length) return;
   const pre = boardAt(j), m = S.history[j], c = pre.toPlay;
-  const you = c === S.game.human, me = you ? '你' : 'AI', op = you ? 'AI' : '你';
+  const you = pvp() || c === S.game.human, me = sideName(c), op = sideName(3 - c);
   const top = A.cands[0];
   let wrMove = 1 - B.wr;
   const cand = A.cands.find(x => x.move === m);
@@ -516,7 +525,7 @@ async function makeComment(j) {
   const wrBest = top ? Math.max(top.wr, wrMove) : wrMove;
   const delta = isBest ? 0 : Math.max(0, wrBest - wrMove);
   const cm = {
-    j, color: c, you, move: m, name: pre.name(m), q: quality(delta, isBest),
+    j, color: c, you, who: me, move: m, name: pre.name(m), q: quality(delta, isBest),
     wrBefore: wrBest, wrAfter: wrMove,
     reasons: G.explain(pre, m, c, A.own, B.own, me, op),
     best: null, isBest,
@@ -556,13 +565,13 @@ function gainPoints(pre, c, ownB, ownA) {
 /** 吃子棋的讲解：只讲吃子、叫吃、逃子这些手段。 */
 function captureComment(j) {
   const pre = boardAt(j), m = S.history[j], c = pre.toPlay;
-  const you = c === S.game.human, me = you ? '你' : 'AI', op = you ? 'AI' : '你';
+  const you = pvp() || c === S.game.human, me = sideName(c), op = sideName(3 - c);
   const reasons = G.explain(pre, m, c, null, null, me, op);
   const after = boardAt(j + 1);
   const threat = atariGroups(after, 3 - c);
-  if (!you && threat.length) reasons.push('AI 在叫吃你的棋！想一想：往外长能不能长出 3 口气？能不能反过来提掉叫吃你的子？');
-  if (you && atariGroups(after, c).length) reasons.push('小心：你自己还有棋子只剩一口气（红圈）。');
-  S.comments[j] = { j, you, move: m, name: pre.name(m), reasons, simple: true };
+  if (threat.length && (!you || pvp())) reasons.push(`${me}在叫吃${op}的棋！${op}想一想：往外长能不能长出 3 口气？能不能反过来提掉叫吃的子？`);
+  if (atariGroups(after, c).length) reasons.push(`小心：${me}自己还有棋子只剩一口气（红圈）。`);
+  S.comments[j] = { j, you, who: me, move: m, name: pre.name(m), reasons, simple: true };
 }
 
 async function showHint() {
@@ -571,7 +580,7 @@ async function showHint() {
     const b = S.board.copy();
     const m = G.captureMove(b.copy(), G.makeRng(7), 2);
     if (m === PASS) { toast('没有好的着法了'); return; }
-    S.hint = { move: m, name: b.name(m), wr: null, reasons: G.explain(b, m, b.toPlay, null, null, '你', 'AI'), others: [] };
+    S.hint = { move: m, name: b.name(m), wr: null, reasons: G.explain(b, m, b.toPlay, null, null, sideName(b.toPlay), sideName(3 - b.toPlay)), others: [] };
     Q.mark = [m];
     render();
     return;
@@ -589,15 +598,173 @@ async function showHint() {
   if (!o || gen !== S.gen || S.history.length !== k) return;
   S.hint = {
     move: top.move, name: pre.name(top.move), wr: top.wr,
-    reasons: G.explain(pre, top.move, pre.toPlay, a.own, o.own, '你', 'AI'),
+    reasons: G.explain(pre, top.move, pre.toPlay, a.own, o.own, sideName(pre.toPlay), sideName(3 - pre.toPlay)),
     others: a.cands.slice(1, 3).map(c => ({ name: pre.name(c.move), wr: c.wr })),
   };
   render();
 }
 
+// ---------------- 本局总结：为什么赢、为什么输 ----------------
+
+const REGION_NAMES = [['左上角', '上边', '右上角'], ['左边', '中央', '右边'], ['左下角', '下边', '右下角']];
+function regionOf(b, p) {
+  const t = b.n / 3;
+  return REGION_NAMES[Math.min(2, Math.floor(b.y(p) / t))][Math.min(2, Math.floor(b.x(p) / t))];
+}
+
+/** 终局时每个点归谁：数子时用确认的结果，认输时用引擎的估计。 */
+function finalOwner(b) {
+  const own = new Int8Array(b.size);
+  if (S.scoring) {
+    for (let p = 0; p < b.size; p++) {
+      const v = b.b[p];
+      if (S.scoring.terr[p]) own[p] = S.scoring.terr[p];
+      else if ((v === BLACK || v === WHITE) && !S.scoring.dead[p]) own[p] = v;
+    }
+    return own;
+  }
+  const la = latestAnalysis(S.analyses, S.history.length);
+  if (!la) return null;
+  for (let p = 0; p < b.size; p++) {
+    if (b.b[p] === G.BORDER) continue;
+    const v = la.a.own[p];
+    own[p] = v > 0.3 ? BLACK : v < -0.3 ? WHITE : 0;
+  }
+  return own;
+}
+
+function deadChains(b) {
+  let dead = null;
+  if (S.scoring) dead = S.scoring.dead;
+  else {
+    const la = latestAnalysis(S.analyses, S.history.length);
+    if (la) dead = G.guessDead(b, la.a.own);
+  }
+  if (!dead) return [];
+  const seen = new Set(), out = [];
+  for (let p = 0; p < b.size; p++) {
+    if (!dead[p] || seen.has(p)) continue;
+    const g = G.groupLibs(b, p);
+    g.stones.forEach(q => seen.add(q));
+    out.push({ color: b.b[p], stones: g.stones, where: regionOf(b, p) });
+  }
+  return out.sort((x, y) => y.stones.length - x.stones.length);
+}
+
+/** 吃子棋：每一次提子是哪一手、之前是从哪一手开始被叫吃、当时该怎么救。 */
+function captureEvents() {
+  const out = [];
+  for (let j = 0; j < S.history.length; j++) {
+    const before = boardAt(j), after = boardAt(j + 1);
+    const n = after.capB + after.capW - before.capB - before.capW;
+    if (!n) continue;
+    const mover = before.toPlay, victim = 3 - mover;
+    const gone = [];
+    for (let p = 0; p < before.size; p++) if (before.b[p] === victim && after.b[p] === EMPTY) gone.push(p);
+    // 往前找：这块棋从哪一手开始只剩一口气
+    let atariAt = j - 1, save = null;
+    for (let k = j - 1; k >= 0; k--) {
+      const bk = boardAt(k + 1);
+      if (!gone.every(p => bk.b[p] === victim)) break;
+      if (G.groupLibs(bk, gone[0]).libs.length !== 1) break;
+      atariAt = k;
+    }
+    if (atariAt >= 0) {
+      const bk = boardAt(atariAt + 1);
+      if (bk.toPlay === victim && bk.b[gone[0]] === victim) {
+        const d = G.findDefense(bk, gone[0], 10, false);
+        save = d !== null && d !== undefined && d >= 0 ? bk.name(d) : null;
+      }
+    }
+    out.push({ j, mover, victim, n, at: after.name(S.history[j]), atariAt, atariMove: atariAt >= 0 ? boardAt(atariAt).name(S.history[atariAt]) : '', save, where: regionOf(before, gone[0]) });
+  }
+  return out;
+}
+
+function buildSummary() {
+  const b = S.board, g = S.game, pv = pvp();
+  const winner = S.result ? S.result.winner : S.scoring ? S.scoring.winner() : 0;
+  if (!winner) return null;
+  const loser = 3 - winner, me = g.human;
+  const won = !pv && winner === me;
+  const head = pv ? `${colorName(winner)}方获胜` : won ? '你赢了！' : '这盘你输了';
+  const items = [], tips = [], facts = [`结果：${head}。`];
+  if (captureRule()) {
+    for (const e of captureEvents()) {
+      const t = `第 ${e.j + 1} 手，${sideName(e.mover)}在 ${e.at} 提掉了${sideName(e.victim)}在${e.where}的 ${e.n} 个子。`
+        + (e.atariAt >= 0 && e.atariAt < e.j ? `这块棋从第 ${e.atariAt + 1} 手（${sideName(3 - e.victim)}下 ${e.atariMove}）起就只剩一口气了，${e.save ? `当时${sideName(e.victim)}下 <b>${e.save}</b> 就能救出来。` : '当时已经很难救了。'}` : '');
+      items.push({ html: t, j: e.atariAt >= 0 ? e.atariAt + 1 : e.j });
+      facts.push(t.replace(/<[^>]+>/g, ''));
+    }
+    if (!won && !pv) tips.push('每下一手之前，先看看自己有没有只剩一口气（红圈）的棋子；被叫吃了就往外长，长出 3 口气才安全。');
+    if (won && !pv) tips.push('你已经会吃子了！试试把“先吃到几个子”调高，或者去下 9 路的正式对局。');
+  } else {
+    if (S.scoring) {
+      const sc = S.scoring;
+      items.push({ html: `数子：黑 ${sc.black}，白 ${sc.white}（黑贴 ${g.komi}）→ ${sc.diff() > 0 ? '黑' : '白'}胜 ${Math.abs(sc.diff())}。` });
+    } else if (S.result) {
+      items.push({ html: `${esc(S.result.text)}。` });
+    }
+    const own = finalOwner(b);
+    if (own) {
+      const reg = {};
+      for (let p = 0; p < b.size; p++) {
+        if (!own[p]) continue;
+        const r = regionOf(b, p);
+        reg[r] = reg[r] || { [BLACK]: 0, [WHITE]: 0 };
+        reg[r][own[p]]++;
+      }
+      const diffs = Object.entries(reg).map(([r, c]) => ({ r, b: c[BLACK], w: c[WHITE], d: c[BLACK] - c[WHITE] }))
+        .filter(x => Math.abs(x.d) >= 3).sort((x, y) => Math.abs(y.d) - Math.abs(x.d)).slice(0, 4);
+      if (diffs.length) {
+        const t = '各区域的地盘（棋子 + 围住的空点）：' + diffs.map(x => `${x.r} 黑 ${x.b}、白 ${x.w}（${x.d > 0 ? '黑' : '白'}多 ${Math.abs(x.d)}）`).join('；') + '。';
+        items.push({ html: t });
+        facts.push(t);
+        const bestForWinner = diffs.filter(x => (x.d > 0) === (winner === BLACK));
+        if (bestForWinner.length) facts.push(`${sideName(winner)}主要赢在：${bestForWinner.slice(0, 2).map(x => x.r).join('、')}。`);
+      }
+    }
+    for (const dg of deadChains(b).slice(0, 3)) {
+      const t = `${sideName(dg.color)}在${dg.where}的 ${dg.stones.length} 个子最后成了死棋（对方因此多得约 ${dg.stones.length * 2}）。`;
+      items.push({ html: t });
+      facts.push(t);
+    }
+    const drops = Object.values(S.comments)
+      .filter(c => !c.simple && c.q && (pv || c.color === me) && c.wrBefore - c.wrAfter > 0.06)
+      .sort((x, y) => (y.wrBefore - y.wrAfter) - (x.wrBefore - x.wrAfter)).slice(0, 3);
+    for (const c of drops) {
+      const t = `第 ${c.j + 1} 手 ${esc(c.who || '你')}下 ${esc(c.name)}（${c.q.label}）：胜率从 ${pct(c.wrBefore)} 降到 ${pct(c.wrAfter)}${c.best ? `，更好的是 <b>${esc(c.best.name)}</b>` : ''}。`;
+      items.push({ html: t, j: c.j });
+      facts.push(t.replace(/<[^>]+>/g, ''));
+    }
+    if (!pv) {
+      const myDead = deadChains(b).filter(d => d.color === me).reduce((n, d) => n + d.stones.length, 0);
+      if (drops.some(c => (c.reasons || []).some(r => r.includes('一路')))) tips.push('开局和中盘少下一路（最边上的线），先占角、再拆边，价值大得多。');
+      if (myDead >= 3) tips.push('被包围的棋要早点“出头”（往中央跑）或者做出两个眼；气只剩 2 口时就要小心。');
+      if (drops.length) tips.push('点上面带编号的那几手，可以回看当时的局面，试下 AI 推荐的点，比较一下差别。');
+      if (won) tips.push('赢了就把难度调高一级，或者把“AI 胜率控制”往上调。');
+      if (!tips.length) tips.push('下完多回看几遍，重点看胜率掉得最多的那一手。');
+    }
+  }
+  const html = `<div class="cm summary best"><div class="h"><b>本局总结：${esc(head)}</b></div>
+    <h4>${pv ? '胜负原因' : won ? '你为什么赢' : '你为什么输'}</h4>
+    <ul>${items.map(it => `<li>${it.html}${it.j !== undefined ? ` <button class="small" data-j="${it.j}">回看这一手</button>` : ''}</li>`).join('')}</ul>
+    ${tips.length ? `<h4>下次注意</h4><ul>${tips.map(t => `<li>${esc(t)}</li>`).join('')}</ul>` : ''}
+    <p><button class="small primary" data-sumai="1">让 AI 老师讲讲这盘棋</button></p></div>`;
+  return { html, facts: facts.join('\n') };
+}
+
+/** 对局结束：生成总结，弹出结果。 */
+function finishGame(text, title) {
+  S.summary = buildSummary();
+  render();
+  showMessage(title || '对局结束', `${text}\n\n下方的“本局总结”里有详细的${pvp() ? '胜负' : '输赢'}原因。`, true);
+}
+
 // ---------------- 对战：操作 ----------------
 
 function newGame(opts) {
+  S.summary = null;
   cancelWork();
   Object.assign(S.game, opts);
   S.setup = G.handicapPoints(S.game.size, S.game.handicap);
@@ -619,6 +786,7 @@ function newGame(opts) {
 
 function undo() {
   if (!S.history.length) return;
+  S.summary = null;
   cancelWork();
   S.result = null;
   S.scoring = null;
@@ -627,7 +795,7 @@ function undo() {
   do {
     S.history.pop();
     rebuild();
-  } while (S.history.length && S.board.toPlay !== S.game.human);
+  } while (S.history.length && !pvp() && S.board.toPlay !== S.game.human);
   truncate(S.history.length);
   save();
   render();
@@ -636,21 +804,22 @@ function undo() {
 
 function humanPass() {
   if (!canHumanMove()) return;
-  toast('你停了一手');
+  toast(pvp() ? `${colorName(S.board.toPlay)}方停了一手` : '你停了一手');
   playMove(PASS);
 }
 
 function resign() {
   if (S.result || S.scoring) return;
-  showMessage('认输', '确定要认输吗？', false, [
+  const loser = pvp() ? S.board.toPlay : S.game.human;
+  showMessage('认输', pvp() ? `确定${colorName(loser)}方认输吗？` : '确定要认输吗？', false, [
     { label: '取消' },
     {
       label: '认输', primary: true, fn: () => {
         cancelWork();
-        S.result = { text: '你认输了，AI 获胜', winner: 3 - S.game.human };
+        S.result = { text: pvp() ? `${colorName(loser)}方认输，${colorName(3 - loser)}方获胜` : '你认输了，AI 获胜', winner: 3 - loser };
         recordGame();
         save();
-        render();
+        finishGame(S.result.text);
       },
     },
   ]);
@@ -927,7 +1096,7 @@ function enterReview(j) {
   if (j === undefined) {
     // 默认回到你最近一手之前：看看当时该怎么下
     j = S.history.length - 1;
-    for (let k = S.history.length - 1; k >= 0; k--) {
+    for (let k = S.history.length - 1; k >= 0 && !pvp(); k--) {
       if (boardAt(k).toPlay === S.game.human) { j = k; break; }
     }
   }
@@ -1434,7 +1603,7 @@ function boardView() {
     const b = reviewBoard();
     return { b, k: S.view, list: S.analyses, review: true, ghostColor: b.toPlay };
   }
-  return { b: S.board, k: S.history.length, list: S.analyses, ghostColor: canHumanMove() ? S.game.human : 0 };
+  return { b: S.board, k: S.history.length, list: S.analyses, ghostColor: canHumanMove() ? S.board.toPlay : 0 };
 }
 
 function drawBoard() {
@@ -1610,6 +1779,29 @@ function drawBoard() {
     }
   }
 
+  // 标出得失：最近一手让哪些点变成了谁的（方块），以及被紧气的棋还剩哪几口气（红点）
+  if (S.prefs.marks && S.mode === 'play' && !v.review && !scoring && !Q.area && !Q.mark && S.history.length) {
+    const j = S.history.length - 1, last = S.history[j], cm = S.comments[j];
+    if (cm && cm.gain && cm.gain.length) {
+      const blue = pvp() ? cm.color === BLACK : cm.color === S.game.human;
+      ctx.fillStyle = blue ? 'rgba(21,101,192,.4)' : 'rgba(230,81,0,.42)';
+      const h = cell * 0.2;
+      for (const nm of cm.gain) { const p = nameToPt(b, nm); if (p >= 0 && b.b[p] === EMPTY) ctx.fillRect(X(p) - h, Y(p) - h, 2 * h, 2 * h); }
+    }
+    if (last >= 0 && b.b[last] !== EMPTY) {
+      const seenG = new Set();
+      for (const q of [last, ...b.dir.map(d => last + d)]) {
+        const c = b.b[q];
+        if (c !== BLACK && c !== WHITE) continue;
+        const gl = G.groupLibs(b, q);
+        if (seenG.has(gl.stones[0]) || gl.libs.length > 3) continue;
+        seenG.add(gl.stones[0]);
+        ctx.fillStyle = '#d32f2f';
+        for (const l of gl.libs) { ctx.beginPath(); ctx.arc(X(l), Y(l), Math.max(2.5, r * 0.2), 0, Math.PI * 2); ctx.fill(); }
+      }
+    }
+  }
+
   if (Q.area) {
     ctx.fillStyle = 'rgba(21,101,192,.45)';
     const h = cell * 0.22;
@@ -1648,11 +1840,11 @@ function onBoardTap(p) {
   if (p === NONE) return;
   if (S.view !== null) { reviewTry(p); return; }
   if (S.scoring) {
-    if (S.scoring.toggle(p)) render();
+    if (S.scoring.toggle(p)) { S.summary = buildSummary(); recordGame(); render(); }
     return;
   }
   if (!canHumanMove()) return;
-  const b = S.board, me = S.game.human;
+  const b = S.board, me = b.toPlay;
   if (!b.isLegal(p, me)) {
     if (b.b[p] === EMPTY) toast(p === b.ko ? '打劫：需要先在别处走一手，才能提回' : '这里不能落子（禁着点）');
     return;
@@ -1661,7 +1853,7 @@ function onBoardTap(p) {
     // 新手辅助：这手会让自己被叫吃时先提醒
     if (S.prefs.helper && b.isSelfAtari(p, me)) {
       S.pendingTap = p;
-      toast('注意：下在这里，你的棋只剩一口气，可能被提掉。确定要下就再点一次。');
+      toast(`注意：下在这里，${pvp() ? colorName(me) + '方' : '你'}的棋只剩一口气，可能被提掉。确定要下就再点一次。`);
       drawBoard();
       return;
     }
@@ -1710,7 +1902,7 @@ function setWr(left, frac, right, blackWhite) {
 function humanWr() {
   const la = latestAnalysis(S.analyses, S.history.length);
   if (!la) return null;
-  return la.a.toPlay === S.game.human ? la.a.wr : 1 - la.a.wr;
+  return la.a.toPlay === (pvp() ? BLACK : S.game.human) ? la.a.wr : 1 - la.a.wr;
 }
 
 function statusText() {
@@ -1720,10 +1912,14 @@ function statusText() {
   if (S.result) return S.result.text;
   const g = S.game, b = S.board;
   const info = captureRule()
-    ? `吃子棋 · 先吃到 ${g.captureN} 子获胜 · 你吃了 ${g.human === BLACK ? b.capB : b.capW}，AI 吃了 ${g.human === BLACK ? b.capW : b.capB}`
+    ? (pvp() ? `吃子棋 · 先吃到 ${g.captureN} 子获胜 · 黑吃了 ${b.capB}，白吃了 ${b.capW}`
+      : `吃子棋 · 先吃到 ${g.captureN} 子获胜 · 你吃了 ${g.human === BLACK ? b.capB : b.capW}，AI 吃了 ${g.human === BLACK ? b.capW : b.capB}`)
     : `${g.size}路 · 第 ${b.moveCount} 手 · 提子 黑${b.capB} 白${b.capW}`;
   let s;
-  if (b.toPlay !== g.human) s = `AI（${captureRule() ? '吃子棋' : S.prefs.target < 100 ? '让棋' : LEVELS[S.prefs.level].name}）思考中…`;
+  if (pvp()) {
+    s = `真人对战 · 轮到${colorName(b.toPlay)}方`;
+    if (b.lastMove === PASS && b.moveCount > 0) s += `（${colorName(3 - b.toPlay)}方停了一手）`;
+  } else if (b.toPlay !== g.human) s = `AI（${captureRule() ? '吃子棋' : S.prefs.target < 100 ? '让棋' : LEVELS[S.prefs.level].name}）思考中…`;
   else {
     s = `轮到你（执${colorName(g.human)}）`;
     if (b.lastMove === PASS && b.moveCount > 0) s += ' · AI 停了一手';
@@ -1733,6 +1929,7 @@ function statusText() {
     const la = latestAnalysis(S.analyses, S.history.length);
     if (la) s += `\n形势判断：${la.a.score > 0 ? '黑' : '白'}领先约 ${Math.abs(la.a.score).toFixed(1)}`;
   }
+  if (S.prefs.marks && S.history.length) s += `\n棋盘标记：${pvp() ? '蓝/橙方块 = 黑/白方' : '蓝方块 = 你、橙方块 = AI'}这手得到的点；红点 = 被紧气的棋剩下的气`;
   return s;
 }
 
@@ -1745,11 +1942,11 @@ function commentHtml(c) {
   const num = `第 ${c.j + 1} 手`;
   if (c.simple) {
     return `<div class="cm ${c.you ? 'good' : 'ai'}${S.view === c.j ? ' viewing' : ''}" data-j="${c.j}">
-      <div class="h"><b>${num}</b> ${c.you ? '你' : 'AI'}下 ${esc(c.name)}</div>${reasonsHtml(c.reasons)}</div>`;
+      <div class="h"><b>${num}</b> ${esc(c.who || (c.you ? '你' : 'AI'))}下 ${esc(c.name)}</div>${reasonsHtml(c.reasons)}</div>`;
   }
   if (c.you) {
     let h = `<div class="cm ${c.q.cls}${S.view === c.j ? ' viewing' : ''}" data-j="${c.j}">
-      <div class="h"><b>${num}</b> 你下 ${esc(c.name)} <span class="tag ${c.q.cls}">${c.q.label}</span>
+      <div class="h"><b>${num}</b> ${esc(c.who || '你')}下 ${esc(c.name)} <span class="tag ${c.q.cls}">${c.q.label}</span>
       <span class="wr">胜率 ${pct(c.wrBefore)} → ${pct(c.wrAfter)}</span></div>${reasonsHtml(c.reasons)}`;
     if (c.best) {
       h += `<div class="better">更好的是 <b>${esc(c.best.name)}</b>（胜率约 ${pct(c.best.wr)}）${reasonsHtml(c.best.reasons)}</div>`;
@@ -1768,7 +1965,7 @@ function commentHtml(c) {
 function reviewHtml() {
   const j = S.view, b = boardAt(j), m = S.history[j], c = b.toPlay;
   let h = `<div class="cm hint"><div class="h"><b>回看：第 ${j + 1} 手之前</b></div>
-    <p>实战${c === S.game.human ? '你' : ' AI '}下在 <b>${esc(b.name(m))}</b>（红圈）。${captureRule() ? '' : '彩色圆圈是 AI 推荐的点，数字是走那里之后的胜率。'}</p>
+    <p>实战${sideName(c)}下在 <b>${esc(b.name(m))}</b>（红圈）。${captureRule() ? '' : '彩色圆圈是 AI 推荐的点，数字是走那里之后的胜率。'}</p>
     <p class="note">在棋盘上点一下就是“试下”，可以连续试几手（黑白轮流），真正的对局不会被改变。看完点“回到当前”继续下。</p>`;
   const tn = S.tryNote;
   if (tn) {
@@ -1786,6 +1983,8 @@ function reviewHtml() {
 function playCoachHtml() {
   if (S.view !== null) return reviewHtml();
   let html = '';
+  if ((S.result || S.scoring) && !S.summary) S.summary = buildSummary();
+  if ((S.result || S.scoring) && S.summary) html += S.summary.html;
   if (S.hint) {
     if (S.hint.loading) html += '<div class="cm hint"><b>提示</b> 正在计算…</div>';
     else {
@@ -1923,7 +2122,9 @@ function render() {
       setWr();
     } else {
       const hw = humanWr();
-      if (hw === null) setWr(); else setWr(`你 ${pct(hw)}`, hw, `AI ${pct(1 - hw)}`);
+      if (hw === null) setWr();
+      else if (pvp()) setWr(`黑 ${pct(hw)}`, hw, `白 ${pct(1 - hw)}`, true);
+      else setWr(`你 ${pct(hw)}`, hw, `AI ${pct(1 - hw)}`);
     }
     $('status').textContent = statusText();
     const my = canHumanMove();
@@ -1938,6 +2139,7 @@ function render() {
     $('chkCands').checked = S.prefs.cands;
     $('chkConfirm').checked = S.prefs.confirm;
     $('chkHelper').checked = S.prefs.helper;
+    $('chkMarks').checked = S.prefs.marks;
     if (S.view !== null) {
       $('reviewText').textContent = `回看第 ${S.view + 1} 手之前${S.tries.length ? ` · 已试下 ${S.tries.length} 手` : ''}`;
       $('btnRvPrev').disabled = S.view === 0;
@@ -1958,14 +2160,15 @@ function askContext() {
     return { b, getA: () => getStudyAnalysis(T.idx), me: b.toPlay, meName: colorName(b.toPlay), komi: sg().komi || 0, budget: STUDY_BUDGET };
   }
   const k = S.history.length;
-  return { b: S.board.copy(), getA: () => getAnalysis(k), me: S.game.human, meName: '你', komi: S.game.komi, budget: BUDGET[S.game.size] };
+  return { b: S.board.copy(), getA: () => getAnalysis(k), me: perspective(), meName: sideName(perspective()), komi: S.game.komi, budget: BUDGET[S.game.size] };
 }
 
 /** 对话记录：同一个问题的“正在分析…”会被后来的答案替换。 */
-function askShow(q, html, src) {
+function askShow(q, html, src, isPending) {
+  const pending = isPending === undefined ? /正在/.test(html) : isPending;
   const last = Q.log[Q.log.length - 1];
-  if (last && last.q === q && last.pending) Object.assign(last, { html, src, pending: /正在/.test(html) });
-  else Q.log.push({ q, html, src, pending: /正在/.test(html) });
+  if (last && last.q === q && last.pending) Object.assign(last, { html, src, pending });
+  else Q.log.push({ q, html, src, pending });
   if (Q.log.length > 30) Q.log.shift();
   const box = $('askAnswer');
   box.innerHTML = Q.log.map(m => `<div class="chat-q">${esc(m.q)}</div><div class="chat-a">${m.html}${m.src ? `<div class="note src">${esc(m.src)}</div>` : ''}</div>`).join('');
@@ -2209,6 +2412,7 @@ function showTarget() {
 function openNewGame() {
   if (S.mode !== 'play') setMode('play');
   fNew.rule.value = captureRule() ? `capture${S.game.captureN}` : 'normal';
+  fNew.opp.value = S.game.opp === 'human' ? 'human' : 'ai';
   fNew.size.value = String(S.game.size);
   fNew.human.value = String(S.game.human);
   fillHandicap(S.game.size, S.game.handicap);
@@ -2239,6 +2443,7 @@ dlgNew.addEventListener('close', () => {
   const rule = fNew.rule.value;
   const handicap = rule === 'normal' ? +fNew.handicap.value : 0, auto = fNew.komi.value === 'auto';
   newGame({
+    opp: fNew.opp.value === 'human' ? 'human' : 'ai',
     rule: rule === 'normal' ? 'normal' : 'capture',
     captureN: rule === 'normal' ? 1 : +rule.slice(7),
     size: +fNew.size.value, human: +fNew.human.value, handicap,
@@ -2275,6 +2480,7 @@ function fillGameSelect() {
       : `${g.title}（${g.year}${g.result ? '，' + g.result : ''}，${gameMoves(g).length} 手）`;
     grp.items.push(`<option value="${i}">${esc(text)}</option>`);
   });
+  if (T.cat === 'games' && !RECORDS.length) groups.push({ label: '我的对局', items: ['<option disabled>还没有下完的对局（下完一盘就会出现在这里）</option>'] });
   $('selGame').innerHTML = groups.map(g => `<optgroup label="${esc(g.label)}">${g.items.join('')}</optgroup>`).join('');
   $('selGame').value = String(T.gi);
 }
@@ -2323,6 +2529,7 @@ bindPref('chkCoach', 'coach', () => {
   if (S.prefs.coach && !captureRule()) S.analyses.forEach((a, k) => a && makeComment(k));
 });
 bindPref('chkCands', 'cands');
+bindPref('chkMarks', 'marks');
 bindPref('chkConfirm', 'confirm', () => { S.pendingTap = NONE; });
 bindPref('chkHelper', 'helper', () => { S.pendingTap = NONE; });
 
@@ -2341,6 +2548,15 @@ $('coach').addEventListener('click', e => {
   }
   const go = e.target.closest('[data-go]');
   if (go) { stopAuto(); studyGo(+go.dataset.go); return; }
+  if (e.target.closest('[data-sumai]')) {
+    openAsk(true);
+    const q = pvp() ? '请结合【本局总结】讲讲这盘棋胜负的原因，双方下次各要注意什么。' : '请结合【本局总结】讲讲我这盘棋为什么赢或者为什么输，下次要注意什么。';
+    anyLLM().then(ok => {
+      if (ok) askLLM(q);
+      else askShow('这盘棋为什么这样结束？', `${S.summary ? S.summary.html : ''}<p class="note">现在没有可用的大模型，上面是本机引擎的分析。联网或回到家里时，可以让 AI 老师用大白话再讲一遍。</p>`, '回答来自：本机围棋引擎');
+    });
+    return;
+  }
   const gb = e.target.closest('[data-gain]');
   if (gb) {
     e.stopPropagation();
