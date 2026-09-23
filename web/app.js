@@ -2,7 +2,7 @@
 /* 围棋对战教练：对战、学习（课程与名局）、练习、提问。
  * 引擎在 engine.js；蒙特卡洛计算在 Web Worker 里进行，局部死活计算在主线程（很快）。 */
 
-const APP_VERSION = '2.4';
+const APP_VERSION = '2.5';
 const G = window.Go;
 const { EMPTY, BLACK, WHITE, PASS, NONE, RESIGN } = G;
 const GAMES = window.GAMES || [];
@@ -172,6 +172,7 @@ const Q = { open: false, pick: null, seq: 0, mark: null };
 // 学习（课程 + 名局）
 const T = {
   gi: 0, idx: 0, gen: 0,
+  cat: 'learn', last: {},   // 学习（课程）/ 棋谱（名局与我的对局）两个标签页各自记住看到哪里
   analyses: [], aprom: [], comments: {},
   guess: false, hit: 0, tried: 0, lastGuess: null,
   auto: 0, cache: null,
@@ -201,7 +202,7 @@ function save() {
     localStorage.setItem(STORE_KEY, JSON.stringify({
       mode: S.mode, game: S.game, prefs: S.prefs, setup: S.setup, history: S.history,
       result: S.scoring ? null : S.result, comments: S.comments, done: S.done, sync: S.sync,
-      study: { gi: T.gi, idx: T.idx }, practice: { i: P.i },
+      study: { gi: T.gi, idx: T.idx, cat: T.cat, last: T.last }, practice: { i: P.i },
     }));
   } catch (e) { /* 存储不可用时忽略 */ }
 }
@@ -225,6 +226,8 @@ function load() {
       if (d.study) {
         T.gi = clamp(d.study.gi | 0, 0, Math.max(0, GAMES.length - 1));
         T.idx = d.study.idx | 0;
+        T.cat = d.study.cat === 'games' ? 'games' : 'learn';
+        T.last = d.study.last || {};
       }
       if (d.practice) P.i = clamp(d.practice.i | 0, 0, Math.max(0, PROBLEMS.length - 1));
     }
@@ -1251,8 +1254,26 @@ function practiceAnswer() {
 
 // ---------------- 模式切换 ----------------
 
+const catOf = g => (g.kind === 'game' || g.kind === 'mine' ? 'games' : 'learn');
+
+/** 切换“学习”或“棋谱”标签页：各自回到上次看的那一课 / 那一局。 */
+function setStudyCat(cat) {
+  if (S.mode === 'study' && T.cat === cat) return;
+  if (S.mode === 'study') T.last[T.cat] = T.gi;
+  T.cat = cat;
+  const want = T.last[cat];
+  const gi = GAMES[want] && catOf(GAMES[want]) === cat ? want : GAMES.findIndex(g => catOf(g) === cat);
+  if (S.mode !== 'study') { if (T.gi !== gi) T.idx = 0; T.gi = gi; setMode('study'); if (sg().kind === 'yi') { yiSelect(0); render(); } return; }
+  fillGameSelect();
+  selectGame(gi);
+}
+
 function setMode(m) {
   if (S.mode === m) return;
+  if (m === 'study' && (!GAMES[T.gi] || catOf(GAMES[T.gi]) !== T.cat)) {
+    T.gi = GAMES.findIndex(g => catOf(g) === T.cat);
+    T.idx = 0;
+  }
   stopAuto();
   clearTimeout(P.anim);
   cancelWork();
@@ -1748,7 +1769,8 @@ function practiceCoachHtml() {
 function render() {
   const mode = S.mode;
   $('tabPlay').classList.toggle('on', mode === 'play');
-  $('tabStudy').classList.toggle('on', mode === 'study');
+  $('tabStudy').classList.toggle('on', mode === 'study' && T.cat === 'learn');
+  $('tabGames').classList.toggle('on', mode === 'study' && T.cat === 'games');
   $('tabPractice').classList.toggle('on', mode === 'practice');
   $('playBar').hidden = mode !== 'play' || S.view !== null;
   $('reviewBar').hidden = mode !== 'play' || S.view === null;
@@ -2120,7 +2142,7 @@ dlgNew.addEventListener('close', () => {
 
 $('dlgWelcome').addEventListener('close', () => {
   const rv = $('dlgWelcome').returnValue;
-  if (rv === 'learn') { setMode('study'); selectGame(0); }
+  if (rv === 'learn') { T.cat = 'learn'; setMode('study'); selectGame(0); }
   else if (rv === 'practice') { setMode('practice'); practiceGo(0); }
   else setMode('play');
 });
@@ -2134,6 +2156,7 @@ function fillGameSelect() {
   if (T.gi >= GAMES.length) T.gi = 0;
   const groups = [];
   GAMES.forEach((g, i) => {
+    if (catOf(g) !== T.cat) return;
     const label = g.kind === 'yi' ? `《弈》第 ${g.stage} 阶段 · ${g.stageTitle}` : g.kind === 'lesson' ? `动画演示课 · ${g.chapter}` : g.group;
     let grp = groups.find(x => x.label === label);
     if (!grp) groups.push(grp = { label, items: [] });
@@ -2161,7 +2184,8 @@ function fillProblemSelect() {
 // ---------------- 绑定 ----------------
 
 $('tabPlay').addEventListener('click', () => setMode('play'));
-$('tabStudy').addEventListener('click', () => setMode('study'));
+$('tabStudy').addEventListener('click', () => setStudyCat('learn'));
+$('tabGames').addEventListener('click', () => setStudyCat('games'));
 $('tabPractice').addEventListener('click', () => setMode('practice'));
 $('btnNew').addEventListener('click', openNewGame);
 $('btnUndo').addEventListener('click', undo);
