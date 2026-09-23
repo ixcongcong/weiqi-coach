@@ -2,7 +2,7 @@
 /* 围棋对战教练：对战、学习（课程与名局）、练习、提问。
  * 引擎在 engine.js；蒙特卡洛计算在 Web Worker 里进行，局部死活计算在主线程（很快）。 */
 
-const APP_VERSION = '3.5';
+const APP_VERSION = '3.6';
 const G = window.Go;
 const { EMPTY, BLACK, WHITE, PASS, NONE, RESIGN } = G;
 const GAMES = window.GAMES || [];
@@ -20,11 +20,22 @@ const LEVELS = [
 ];
 // 每个局面的分析量（用于讲解、胜率、形势判断）。visits 是神经网络搜索的次数，playouts 是传统引擎的模拟次数
 const BUDGET = {
-  9: { playouts: 8000, ms: 2500, own: 400, visits: 200 },
-  13: { playouts: 5000, ms: 3000, own: 300, visits: 120 },
-  19: { playouts: 4000, ms: 3500, own: 240, visits: 80 },
+  9: { playouts: 8000, ms: 2500, own: 400, visits: 200, home: 400 },
+  13: { playouts: 5000, ms: 3000, own: 300, visits: 120, home: 300 },
+  19: { playouts: 4000, ms: 3500, own: 240, visits: 80, home: 250 },
 };
-const STUDY_BUDGET = { playouts: 2500, ms: 2000, own: 200, visits: 60 };
+const STUDY_BUDGET = { playouts: 2500, ms: 2000, own: 200, visits: 60, home: 150 };
+// 各档 AI 的等级分（用于计分对局）：约 25 级、22 级、17 级、1 级、5 段、9 段
+const AI_RATING = [600, 900, 1400, 2000, 2500, 2900];
+const GROW = new Growth('go');
+/** 按等级分推荐难度：选和“你的等级分 + 50”最接近的一档 */
+function recommendLevel() {
+  const r = GROW.s.rating + 50;
+  let best = 0;
+  AI_RATING.forEach((v, i) => { if (Math.abs(v - r) < Math.abs(AI_RATING[best] - r)) best = i; });
+  return best;
+}
+
 const ENGINES = {
   b10: '神经网络（强，推荐）',
   b6: '神经网络（快，适合旧设备）',
@@ -173,6 +184,11 @@ class NNEngine {
   }
 
   status() {
+    const h = home.ready ? `已连上家里的 Mac：分析和 AI 都用 KataGo 最强网络（${home.model}）。` : S.prefs.home === false ? '' : '（在家连上 Mac 的学习中心时，会自动改用 Mac 上的 KataGo 最强网络。）';
+    return this.status0() + h;
+  }
+
+  status0() {
     if (this.model === 'mcts') return '现在用的是传统引擎。';
     if (this.failed) return `神经网络不可用（${this.failed}），暂时用传统引擎。`;
     if (!this.ready) return '正在加载神经网络…（第一次需要下载约 30 MB，之后离线可用）';
@@ -182,6 +198,96 @@ class NNEngine {
 }
 
 const nn = new NNEngine();
+
+// ---------------- 家里 Mac 的 KataGo（在家时自动使用，最强） ----------------
+
+class HomeEngine {
+  constructor() { this.ready = false; this.model = ''; this.reason = ''; this.checking = false; }
+
+  async post(path, body, ms) {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), ms);
+    try {
+      const res = await fetch(`${syncServer()}${path}`, body ? {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: ctl.signal, cache: 'no-store',
+      } : { signal: ctl.signal, cache: 'no-store' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      return data;
+    } finally { clearTimeout(timer); }
+  }
+
+  async check() {
+    if (S.prefs.home === false) { this.ready = false; return; }
+    if (this.checking) return;
+    this.checking = true;
+    const was = this.ready;
+    try {
+      const r = await this.post('/api/katago/health', null, 2500);
+      this.ready = !!r.ok; this.model = r.model || ''; this.reason = r.reason || '';
+    } catch (e) { this.ready = false; }
+    this.checking = false;
+    if (was !== this.ready) { if (this.ready) toast(`已连上家里的 Mac：用 KataGo 最强网络分析`); if (typeof showEngineStatus === 'function') showEngineStatus(); render(); }
+  }
+
+  /** 把棋盘转成 KataGo 的请求：从两手之前的局面开始，带上最近两手（保留打劫信息） */
+  request(board, visits, komi) {
+    const n = board.n, gtp = p => (p === PASS ? 'pass' : board.name(p));
+    let base = board.b, moves = [];
+    if (board.prev && board.prev[1] && board.hist && board.hist.length >= 2) {
+      base = board.prev[1];
+      moves = board.hist.slice(-2).map(([m, c]) => [c === BLACK ? 'B' : 'W', gtp(m)]);
+    }
+    const stones = [];
+    for (let p = 0; p < board.size; p++) if (base[p] === BLACK || base[p] === WHITE) stones.push([base[p] === BLACK ? 'B' : 'W', gtp(p)]);
+    return {
+      boardSize: n, komi, initialStones: stones, moves, maxVisits: visits,
+      initialPlayer: moves.length ? moves[0][0] : board.toPlay === BLACK ? 'B' : 'W',
+      includeOwnership: true, includePolicy: true,
+    };
+  }
+
+  async search(board, visits, komi) {
+    if (!this.ready) return null;
+    let r;
+    try { r = await this.post('/api/katago/analyze', this.request(board, visits, komi), 60000); } catch (e) {
+      this.ready = false; this.reason = String(e.message || e);
+      if (typeof showEngineStatus === 'function') showEngineStatus();
+      return null;
+    }
+    const n = board.n, me = board.toPlay, sgn = me === BLACK ? 1 : -1;
+    const pt = s => (/^pass$/i.test(s) ? PASS : nameToPt(board, s));
+    const cands = (r.moveInfos || []).map(m => ({
+      move: pt(m.move), visits: m.visits, prior: m.prior,
+      wr: me === BLACK ? m.winrate : 1 - m.winrate, lead: sgn * m.scoreLead,
+    })).filter(c => c.move !== -1).sort((a, b) => b.visits - a.visits);
+    const own = new Float32Array(board.size);
+    if (r.ownership) for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) own[board.pt(x, y)] = r.ownership[y * n + x];
+    const policy = [];
+    if (r.policy) {
+      for (let i = 0; i < r.policy.length; i++) if (r.policy[i] > 0.005) policy.push({ move: i === n * n ? PASS : board.pt(i % n, (i / n) | 0), prior: r.policy[i] });
+      policy.sort((a, b) => b.prior - a.prior);
+    }
+    const root = r.rootInfo || {};
+    const wr = cands.length ? cands[0].wr : (me === BLACK ? root.winrate : 1 - root.winrate);
+    return {
+      cands, playouts: root.visits || 0, wr, lead: cands.length ? cands[0].lead : sgn * root.scoreLead,
+      own, score: root.scoreLead, policy, nn: true, home: true, toPlay: me,
+    };
+  }
+
+  async evaluate(board, komi) {
+    const r = await this.search(board, 32, komi);
+    return r && { own: r.own, score: r.score, wr: r.wr, lead: r.lead, policy: r.policy };
+  }
+}
+const home = new HomeEngine();
+
+/** 更强的搜索：在家用 Mac，否则用本机网络 */
+async function strongSearch(pos, visits, ms, komi) {
+  if (home.ready) { const r = await home.search(pos, visits, komi); if (r) return r; }
+  return nn.search(pos, visits, ms, komi);
+}
 
 // ---------------- Worker 池 ----------------
 
@@ -253,6 +359,7 @@ class Pool {
   }
 
   async ownership(board, count, komi) {
+    if (home.ready) { const r = await home.evaluate(board, komi); if (r) return { own: r.own, score: r.score, nn: true }; }
     await nn.whenReady(20000);
     if (nn.ready) {
       const r = await nn.evaluate(board, komi);
@@ -274,6 +381,7 @@ class Pool {
   }
 
   async analyze(board, budget, komi) {
+    if (home.ready) { const r = await home.search(board, budget.home || 200, komi); if (r) return r; }
     await nn.whenReady(20000);
     if (nn.ready) {
       const r = await nn.search(board, budget.visits, budget.ms, komi);
@@ -295,7 +403,7 @@ const pool = new Pool();
 const S = {
   mode: 'play',
   game: { size: 9, human: BLACK, handicap: 0, komi: 7.5, rule: 'normal', captureN: 1, opp: 'ai' },
-  prefs: { level: 0, target: 100, engine: 'b10', coach: true, confirm: false, cands: false, own: false, helper: true, marks: true },
+  prefs: { level: 0, target: 100, engine: 'b10', home: true, coach: true, confirm: false, cands: false, own: false, helper: true, marks: true },
   summary: null,
   setup: [],
   history: [],
@@ -538,7 +646,7 @@ async function aiTurn(gen, k) {
       else {
         let r = a;
         if (lv.visits > a.playouts) {
-          r = await nn.search(pos, lv.visits, lv.nnMs, S.game.komi);
+          r = await strongSearch(pos, lv.visits, lv.nnMs, S.game.komi);
           if (!r || gen !== S.gen) return;
         }
         move = r.cands[0] ? r.cands[0].move : PASS;
@@ -730,6 +838,7 @@ function captureComment(j) {
 
 async function showHint() {
   if (!canHumanMove()) return;
+  unrate('用了提示');
   if (captureRule()) {
     const b = S.board.copy();
     const m = G.captureMove(b.copy(), G.makeRng(7), 2);
@@ -910,19 +1019,189 @@ function buildSummary() {
 
 /** 对局结束：生成总结，弹出结果。 */
 function finishGame(text, title) {
+  text += growthOnEnd();
   S.summary = buildSummary();
   render();
   showMessage(title || '对局结束', `${text}\n\n下方的“本局总结”里有详细的${pvp() ? '胜负' : '输赢'}原因。`, true);
 }
 
+// ---------------- 成长：计分、错题、弱点 ----------------
+
+function humanWinner() {
+  const w = S.result ? S.result.winner : S.scoring ? S.scoring.winner() : null;
+  return w === null || w === undefined ? null : w === S.game.human ? 1 : 0;
+}
+
+/** 对局结束：计分、把大失误放进错题本、统计弱点。返回要附加在结束提示里的文字。 */
+function growthOnEnd() {
+  if (S.game.growthDone || pvp() || captureRule()) return '';
+  S.game.growthDone = true;
+  let out = '';
+  // 错题本：本局最大的 3 个失误
+  const mistakes = Object.values(S.comments)
+    .filter(c => c.you && !c.simple && c.q && (c.q.cls === 'bad' || c.q.cls === 'slow') && (c.wrBefore - c.wrAfter >= 0.08 || c.pts >= 3))
+    .sort((a, b) => (b.wrBefore - b.wrAfter + (b.pts || 0) / 40) - (a.wrBefore - a.wrAfter + (a.pts || 0) / 40)).slice(0, 3);
+  const n = S.game.size, cats = [];
+  for (const c of mistakes) {
+    const A = S.analyses[c.j];
+    if (!A || !A.cands || !A.cands.length) continue;
+    const top = A.cands[0], pre = boardAt(c.j);
+    const good = A.cands.filter(x => x.visits >= top.visits * 0.1 && x.wr >= top.wr - 0.03).map(x => pre.name(x.move));
+    GROW.addReview({
+      id: `go-${Date.now().toString(36)}-${c.j}`, kind: 'go', now: true,
+      title: `${n} 路对局第 ${c.j + 1} 手（实战 ${c.name}，${c.q.label}）`,
+      size: n, setup: S.setup.slice(), moves: S.history.slice(0, c.j), komi: S.game.komi,
+      good, best: pre.name(top.move), played: c.name,
+    });
+    cats.push(goCategory(c, n));
+  }
+  if (cats.length) GROW.addWeak(cats);
+  if (mistakes.length) out += `\n\n本局 ${mistakes.length} 个大失误已放进“成长 → 错题本”。`;
+  const res = humanWinner();
+  if (!S.game.rated || res === null) return out + (S.game.unrated ? `\n\n（本局不计分：${S.game.unrated}）` : '');
+  if (S.game.unrated) return out + `\n\n（本局不计分：${S.game.unrated}）`;
+  const lv = S.prefs.level, r = GROW.recordGame({ opp: AI_RATING[lv], oppName: `AI（${LEVELS[lv].name}）`, result: res });
+  out = `\n\n计分对局：等级分 ${r.before} → ${r.after}（${r.delta >= 0 ? '+' : ''}${r.delta}）` +
+    (r.promoted ? `，升到 ${r.rankAfter}！🎉` : r.demoted ? `，降到 ${r.rankAfter}。` : `，现在是 ${r.rankAfter}。`) +
+    (r.msgs.length ? ' ' + r.msgs.join(' ') : '') + (r.provisional ? '（定级赛）' : '') + out;
+  return out;
+}
+
+/** 计分对局下了 10 手以上中途开新局：算输 */
+function growthAbandon() {
+  if (!S.game || !S.game.rated || S.game.unrated || S.game.growthDone || S.result || S.scoring || S.history.length < 10 || pvp()) return;
+  S.game.growthDone = true;
+  const lv = S.prefs.level, r = GROW.recordGame({ opp: AI_RATING[lv], oppName: `AI（${LEVELS[lv].name}）`, result: 0, note: '中途放弃' });
+  toast(`上一盘计分对局中途放弃，按输计算：${r.delta} 分`);
+}
+
+const GO_CATS = {
+  '吃子与逃子': { re: /提|吃|叫吃|逃|气/, lessons: ['吃子', '叫吃', '征子', '逃'], problems: /提子|征子|吃|逃/ },
+  '死活': { re: /眼|做活|死活|杀/, lessons: ['死活', '眼'], problems: /死活|点眼|做活/ },
+  '断与连': { re: /断|连|切/, lessons: ['断', '连'], problems: /断|连/ },
+  '布局': { lessons: ['布局', '大场', '角'] },
+  '收官': { lessons: ['官子', '收官'] },
+  '棋形与方向': { lessons: ['棋形', '方向', '形'] },
+};
+function goCategory(c, n) {
+  const text = (c.reasons || []).concat(c.best && c.best.reasons ? c.best.reasons : []).join(' ');
+  for (const k of ['吃子与逃子', '死活', '断与连']) if (GO_CATS[k].re.test(text)) return k;
+  const early = n === 9 ? 12 : n === 13 ? 30 : 50, late = n === 9 ? 40 : n === 13 ? 90 : 180;
+  if (c.j < early) return '布局';
+  if (c.j > late) return '收官';
+  return '棋形与方向';
+}
+
+function growthRecommend(cat) {
+  const conf = GO_CATS[cat] || {}, out = [];
+  for (const kw of conf.lessons || []) {
+    const gi = GAMES.findIndex(g => (g.kind === 'yi' || g.kind === 'lesson') && g.title.includes(kw) && !S.done.lessons[g.id]);
+    if (gi >= 0 && !out.some(o => o.gi === gi)) out.push({ gi, label: GAMES[gi].title });
+    if (out.length >= 2) break;
+  }
+  if (conf.problems) {
+    const pi = PROBLEMS.findIndex(q => conf.problems.test(q.title) && !S.done.problems[q.id]);
+    if (pi >= 0) out.push({ pi, label: `练习：${PROBLEMS[pi].title}` });
+  }
+  return out;
+}
+
+// 错题复习（围棋对局里的失误）
+const GR = { item: null, board: null, phase: '', msg: '', last: NONE };
+function growthStartReview() {
+  const due = GROW.dueReviews();
+  if (!due.length) { toast('现在没有到期的错题，做几道新题吧'); return; }
+  const it = due[0];
+  if (it.kind === 'problem') {
+    const i = PROBLEMS.findIndex(q => q.id === it.pid);
+    if (i < 0) { GROW.reviewResult(it.id, true); growthStartReview(); return; }
+    P.reviewId = it.id;
+    setMode('practice');
+    practiceGo(i);
+    toast('错题复习：做对就算过关');
+    return;
+  }
+  GR.item = it;
+  const b = new G.Board(it.size);
+  b.setup(it.setup || []);
+  for (const m of it.moves) b.play(m);
+  GR.board = b; GR.side = b.toPlay; GR.phase = 'ask'; GR.msg = ''; GR.last = b.lastMove;
+  if (S.mode !== 'growth') setMode('growth'); else { layout(); render(); }
+}
+function growthTap(p) {
+  if (!GR.item || GR.phase !== 'ask' || p === NONE) return;
+  const b = GR.board, it = GR.item;
+  if (!b.isLegal(p, b.toPlay)) { toast('这里不能下'); return; }
+  const name = b.name(p);
+  const ok = it.good.includes(name);
+  b.play(p);
+  GR.last = p;
+  GR.phase = ok ? 'right' : 'wrong';
+  const note = GROW.reviewResult(it.id, ok);
+  GR.msg = ok ? `对了！${name}${name === it.best ? '' : `（引擎的首选是 ${it.best}，你这手也很好）`}。${note}` : `不对：${name}。引擎推荐 ${it.best}${it.good.length > 1 ? `（${it.good.join('、')} 都可以）` : ''}，实战下的是 ${it.played}。${note}`;
+  render();
+}
+
+function growthHtml() {
+  let h = `<div class="cm game growth">${GROW.rankCard()}${GROW.chart()}</div>`;
+  if (GR.item) {
+    h += `<div class="cm hint"><div class="h"><b>错题复习</b><span class="wr">${esc(GR.item.title)}</span></div>
+      <p>${colorName(GR.side)}走。这是你以前下错的局面，想一想这里最好下在哪里？</p>
+      ${GR.msg ? `<p class="${GR.phase === 'right' ? 'feedback ok' : 'feedback no'}">${esc(GR.msg)}</p>` : ''}
+      <p>${GR.phase !== 'ask' ? '<button class="small primary" data-g="review">下一题</button> ' : ''}<button class="small" data-g="endreview">结束复习</button></p></div>`;
+  }
+  if (GROW.justCompleted) { GROW.justCompleted = false; toast('今天的训练全部完成！'); }
+  h += `<div class="cm"><div class="h"><b>今日训练</b>${GROW.s.days ? `<span class="wr">已连续 ${GROW.s.days} 天</span>` : ''}</div>${GROW.planHtml()}</div>`;
+  const weak = GROW.topWeak(3);
+  h += `<div class="cm"><div class="h"><b>我的弱点</b><span class="wr">根据对局里的失误统计</span></div>`;
+  if (!weak.length) h += '<p class="note">和 AI 下几盘完整的对局（开着“讲解”），这里会统计你最常犯的错误类型，并推荐对应的课和题。</p>';
+  else h += '<ul class="g-weak">' + weak.map(w => `<li><b>${esc(w.c)}</b>（${w.v}）${growthRecommend(w.c).map(r => ` <button class="small" data-g="${r.gi !== undefined ? `lesson:${r.gi}` : `problem:${r.pi}`}">${esc(r.label)}</button>`).join('')}</li>`).join('') + '</ul>';
+  h += '</div>';
+  const due = GROW.dueReviews().length, total = GROW.s.review.length;
+  h += `<div class="cm"><div class="h"><b>错题本</b><span class="wr">共 ${total} 题，今天到期 ${due} 题</span></div><p>${due ? '<button class="small primary" data-g="review">开始复习</button>' : '<span class="note">没有到期的错题。</span>'}</p></div>`;
+  const log = GROW.logHtml();
+  if (log) h += `<div class="cm"><div class="h"><b>最近的计分对局</b></div>${log}</div>`;
+  h += `<div class="cm"><div class="h"><b>积分与升降级规则</b></div>${GrowthUtil.RULES_HTML}</div>`;
+  return h;
+}
+
+function growthAction(a) {
+  if (a === 'review') { growthStartReview(); return; }
+  if (a === 'endreview') { GR.item = null; GR.board = null; render(); drawBoard(); return; }
+  if (a === 'puzzle') {
+    const i = PROBLEMS.findIndex(q => !S.done.problems[q.id]);
+    setMode('practice');
+    if (i >= 0) practiceGo(i);
+    return;
+  }
+  if (a === 'game') {
+    S.prefs.level = recommendLevel();
+    setMode('play');
+    openNewGame();
+    return;
+  }
+  if (a.startsWith('lesson:')) {
+    const gi = +a.slice(7);
+    T.cat = 'learn';
+    setMode('study');
+    selectGame(gi);
+    return;
+  }
+  if (a.startsWith('problem:')) { setMode('practice'); practiceGo(+a.slice(8)); }
+}
+
 // ---------------- 对战：操作 ----------------
 
 function newGame(opts) {
+  growthAbandon();
   S.summary = null;
   cancelWork();
   Object.assign(S.game, opts);
   S.setup = G.handicapPoints(S.game.size, S.game.handicap);
   S.game.recId = null;
+  S.game.growthDone = false;
+  S.game.unrated = '';
+  S.game.rated = S.game.opp !== 'human' && S.game.rule === 'normal' && S.prefs.target >= 100 && S.prefs.rated !== false;
   S.history = [];
   S.result = null;
   S.comments = {};
@@ -938,8 +1217,17 @@ function newGame(opts) {
   advance();
 }
 
+/** 计分对局用了悔棋、提示：改为不计分 */
+function unrate(reason) {
+  if (!S.game.rated || S.game.unrated || S.result || S.scoring) return;
+  S.game.unrated = reason;
+  toast(`这盘改为不计分（${reason}）`);
+  save();
+}
+
 function undo() {
   if (!S.history.length) return;
+  unrate('用了悔棋');
   S.summary = null;
   cancelWork();
   S.result = null;
@@ -1553,6 +1841,7 @@ function pb() { return PROBLEMS[P.i]; }
 
 function practiceStart() {
   clearTimeout(P.anim);
+  P.graded = false;
   const q = pb();
   if (!q) return;
   const b = new G.Board(q.size);
@@ -1602,12 +1891,24 @@ function practiceTap(p) {
     const pv = sgfList(b, q.pv.join(''));
     const line = pv[0] === p ? pv : [p];
     practicePlayLine(line, () => {
-      if (!S.done.problems[q.id]) { S.done.problems[q.id] = true; fillProblemSelect(); save(); }
+      const fresh = !S.done.problems[q.id];
+      if (!P.graded) {
+        P.graded = true;
+        GROW.recordPuzzle(500 + (q.level || 1) * 250, true, fresh);
+        if (P.reviewId) { toast(GROW.reviewResult(P.reviewId, true)); P.reviewId = null; }
+      }
+      if (fresh) { S.done.problems[q.id] = true; fillProblemSelect(); save(); }
     });
     return;
   }
   // 答错：找出白棋的应法
   P.phase = 'wrong';
+  if (!P.graded) {
+    P.graded = true;
+    GROW.recordPuzzle(500 + (q.level || 1) * 250, false, false);
+    if (P.reviewId) { toast(GROW.reviewResult(P.reviewId, false)); P.reviewId = null; }
+    else GROW.addReview({ id: `pb-${q.id}`, kind: 'problem', pid: q.id, title: `练习题：${q.title}` });
+  }
   const c = b.copy();
   c.play(p);
   const T0 = sgfPt(b, q.target), depth = Math.min(q.depth, 12);
@@ -1649,7 +1950,10 @@ function practiceTap(p) {
 }
 
 function practiceAnswer() {
+  const q0 = pb();
+  if (q0 && !P.graded) { P.graded = true; GROW.recordPuzzle(500 + (q0.level || 1) * 250, false, false); GROW.addReview({ id: `pb-${q0.id}`, kind: 'problem', pid: q0.id, title: `练习题：${q0.title}` }); }
   practiceStart();
+  P.graded = true;
   P.phase = 'shown';
   const q = pb();
   practicePlayLine(sgfList(P.board, q.pv.join('')));
@@ -1742,6 +2046,9 @@ function starPoints(n) {
 
 /** 当前要画的局面，以及它的附加信息。 */
 function boardView() {
+  if (S.mode === 'growth') {
+    return { b: GR.board || new G.Board(9), practice: true, ghostColor: GR.phase === 'ask' && GR.board ? GR.board.toPlay : 0, last: GR.last };
+  }
   if (S.mode === 'practice') {
     return { b: P.board || new G.Board(9), practice: true, ghostColor: P.phase === 'ask' ? BLACK : 0, last: P.last };
   }
@@ -1991,6 +2298,7 @@ function onBoardTap(p) {
   if (Q.pick && p !== NONE) { askPicked(p); return; }
   if (S.mode === 'study') { if (sg().kind === 'yi') yiTap(p); else studyTap(p); return; }
   if (S.mode === 'practice') { practiceTap(p); return; }
+  if (S.mode === 'growth') { growthTap(p); return; }
   if (p === NONE) return;
   if (S.view !== null) { reviewTry(p); return; }
   if (S.scoring) {
@@ -2237,6 +2545,7 @@ function render() {
   $('tabStudy').classList.toggle('on', mode === 'study' && T.cat === 'learn');
   $('tabGames').classList.toggle('on', mode === 'study' && T.cat === 'games');
   $('tabPractice').classList.toggle('on', mode === 'practice');
+  $('tabGrowth').classList.toggle('on', mode === 'growth');
   $('playBar').hidden = mode !== 'play' || S.view !== null;
   $('reviewBar').hidden = mode !== 'play' || S.view === null;
   $('studyBar').hidden = mode !== 'study';
@@ -2275,6 +2584,10 @@ function render() {
     $('btnAuto').textContent = T.auto ? '暂停' : '自动播放';
     $('btnGuess').classList.toggle('on', T.guess);
     $('coach').innerHTML = studyCoachHtml();
+  } else if (mode === 'growth') {
+    setWr();
+    $('status').textContent = `成长 · ${GROW.rank.name} · 等级分 ${GROW.s.rating}`;
+    $('coach').innerHTML = growthHtml();
   } else if (mode === 'practice') {
     setWr();
     $('status').textContent = '练习：黑先';
@@ -2602,8 +2915,12 @@ function openNewGame() {
   fNew.human.value = String(S.game.human);
   fillHandicap(S.game.size, S.game.handicap);
   fNew.komi.value = S.game.komiAuto === false ? String(S.game.komi) : 'auto';
-  fNew.level.value = String(S.prefs.level);
+  const rec = recommendLevel();
+  fNew.level.value = String(S.prefs.autoLevel === false ? S.prefs.level : rec);
+  fNew.rated.checked = S.prefs.rated !== false;
+  $('levelRec').textContent = `你现在是 ${GROW.rank.name}（等级分 ${GROW.s.rating}），推荐难度：${LEVELS[rec].name}。`;
   fNew.engine.value = S.prefs.engine || 'b10';
+  fNew.home.checked = S.prefs.home !== false;
   showEngineStatus();
   fNew.target.value = String(S.prefs.target);
   showTarget();
@@ -2622,9 +2939,14 @@ $('versionText').textContent = `版本 ${APP_VERSION}`;
 dlgNew.addEventListener('close', () => {
   const rv = dlgNew.returnValue;
   if (rv !== 'ok' && rv !== 'apply') return;
+  if (rv === 'apply' && +fNew.level.value !== S.prefs.level) unrate('中途改了难度');
+  if (+fNew.level.value !== recommendLevel()) S.prefs.autoLevel = false; else S.prefs.autoLevel = true;
   S.prefs.level = +fNew.level.value;
   S.prefs.target = +fNew.target.value;
+  S.prefs.rated = fNew.rated.checked;
   S.prefs.engine = fNew.engine.value;
+  S.prefs.home = fNew.home.checked;
+  home.check();
   const engineChanged = nn.model !== S.prefs.engine;
   if (engineChanged) { cancelWork(); nn.start(S.prefs.engine); }
   if (rv === 'apply') {
@@ -2694,6 +3016,11 @@ $('tabPlay').addEventListener('click', () => setMode('play'));
 $('tabStudy').addEventListener('click', () => setStudyCat('learn'));
 $('tabGames').addEventListener('click', () => setStudyCat('games'));
 $('tabPractice').addEventListener('click', () => setMode('practice'));
+$('tabGrowth').addEventListener('click', () => setMode('growth'));
+document.addEventListener('click', e => {
+  const g = e.target.closest('[data-g]');
+  if (g) growthAction(g.dataset.g);
+});
 $('btnNew').addEventListener('click', openNewGame);
 $('btnUndo').addEventListener('click', undo);
 $('btnPass').addEventListener('click', humanPass);
@@ -2859,6 +3186,9 @@ $('fileImport').addEventListener('change', e => { if (e.target.files[0]) importR
 loadRecords();
 const firstRun = load();
 nn.start(S.prefs.engine || 'b10');
+home.check();
+setInterval(() => home.check(), 120000);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') home.check(); });
 fillGameSelect();
 fillProblemSelect();
 if (S.mode === 'practice') practiceStart();

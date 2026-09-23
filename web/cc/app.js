@@ -34,6 +34,16 @@ const LEVELS = [
   { name: '大师', ms: 5000, temp: 0, note: '每步思考约 5 秒' },
 ];
 const ANALYZE_MS = 700;
+// 各档 AI 的等级分（计分对局用）
+const AI_RATING = [700, 1000, 1400, 1800, 2100];
+const PZ_RATING = { mate1: 800, win: 1100, mate2: 1300, mate3: 1500, fix: 1200 };
+const GROW = new Growth(GAME);
+function recommendLevel() {
+  const r = GROW.s.rating + 50;
+  let best = 0;
+  AI_RATING.forEach((v, i) => { if (Math.abs(v - r) < Math.abs(AI_RATING[best] - r)) best = i; });
+  return best;
+}
 
 // ---------------- 引擎 ----------------
 
@@ -318,12 +328,13 @@ function boardView() {
     if (S.prefs.threat && view === null && !S.play.result && isHumanTurnPlay()) v.danger = R.hanging(p, p.turn);
     return v;
   }
-  if (S.mode === 'learn') return { p: L.pos, last: L.last, movable: L.waiting, marks: L.marks, arrows: L.arrows };
+  if (S.mode === 'learn') return { p: L.pos || R.fromFEN(R.START), last: L.last, movable: L.waiting, marks: L.marks, arrows: L.arrows };
   if (S.mode === 'games') {
     const g = gameList()[S.games.gi];
     if (!g) return { p: R.fromFEN(R.START) };
     return { p: build(g.fen, g.moves, S.games.idx), last: S.games.idx > 0 ? g.moves[S.games.idx - 1] : null, arrows: GS.best ? [[GS.best, '#1565c0']] : null };
   }
+  if (S.mode === 'growth') return { p: R.fromFEN(R.START) };
   return { p: PZ.pos || R.fromFEN(R.START), last: PZ.last, movable: PZ.waiting, arrows: PZ.arrows, marks: PZ.marks };
 }
 
@@ -409,10 +420,11 @@ function canHumanMove() { return S.mode === 'play' && !S.play.result && !aiBusy 
 const sideLabel = c => (pvp() ? SIDES[c] : c === S.play.human ? '你' : 'AI');
 
 function newGame(opts) {
+  growthAbandon();
   eng.cancel();
   gen++;
   aiBusy = false;
-  S.play = { fen: R.START, moves: [], human: opts.human, opp: opts.opp, result: null, comments: {} };
+  S.play = { fen: R.START, moves: [], human: opts.human, opp: opts.opp, result: null, comments: {}, rated: opts.opp === 'ai' && S.prefs.rated !== false, unrated: '', done: false };
   S.flip = opts.opp === 'ai' && opts.human === 1;
   A = []; Aprom = []; view = null; hint = null; sel = -1;
   save();
@@ -536,12 +548,125 @@ function finishGame(res) {
   if (mistakes.length) {
     body += `<p>${you ? '虽然赢了，但这几手可以更好：' : '关键失误：'}</p><ul>${mistakes.map(c => `<li>第 ${c.j + 1} 手 ${esc(c.name)}（${QUALITY[c.q].label}）${c.best ? `，更好的是 ${esc(c.best.name)}` : ''}</li>`).join('')}</ul>`;
   } else if (!pvp()) body += '<p>你没有明显的大失误，下得很稳！</p>';
+  body += growthOnEnd(res, mistakes);
   body += '<p class="note">对局已保存到“棋谱 → 我的对局”，可以随时复盘。</p>';
   showMsg('对局结束', body);
 }
 
+function unrate(reason) {
+  if (!S.play.rated || S.play.unrated || S.play.result) return;
+  S.play.unrated = reason;
+  toast(`这盘改为不计分（${reason}）`);
+  save();
+}
+
+// ---------------- 成长：计分、错题、弱点 ----------------
+
+const CC_CATS = {
+  '送子（没保护好自己的子）': { lessons: ['价值', '保护', '王', '兵'], kinds: ['win'] },
+  '漏吃（没看到能吃的子）': { lessons: ['双击', '双捉', '牵制', '串击', '闪击'], kinds: ['win'] },
+  '漏杀（没看到将军和杀棋）': { lessons: ['杀'], kinds: ['mate1', 'mate2'] },
+  '开局': { lessons: ['开局'], kinds: [] },
+  '计算与残局': { lessons: ['残局', '胜', '杀'], kinds: ['mate2', 'win'] },
+};
+function ccCategory(c) {
+  if (c.reasons.some(r => r.includes('可能被对方吃掉'))) return '送子（没保护好自己的子）';
+  const best = c.best ? c.best.reasons.join(' ') : '';
+  if (/将死|绝杀|杀|将军/.test(best)) return '漏杀（没看到将军和杀棋）';
+  if (/吃掉/.test(best)) return '漏吃（没看到能吃的子）';
+  if (c.j < 16) return '开局';
+  return '计算与残局';
+}
+
+function growthOnEnd(res, mistakes) {
+  if (S.play.done || pvp()) return '';
+  S.play.done = true;
+  let out = '';
+  const mine = mistakes.filter(c => c.q >= 4 && c.best);
+  for (const c of mine) {
+    GROW.addReview({ id: `fix-${Date.now().toString(36)}-${c.j}`, kind: 'fix', now: true, title: `对局第 ${c.j + 1} 手（实战 ${c.name}）`, fen: R.toFEN(build(S.play.fen, S.play.moves, c.j)), best: c.best.u, score: c.best.score });
+  }
+  const cats = Object.values(S.play.comments).filter(c => c.mover === S.play.human && c.q >= 3).map(ccCategory);
+  if (cats.length) GROW.addWeak(cats);
+  if (mine.length) out += `<p class="note">本局 ${mine.length} 个大失误已放进“成长 → 错题本”。</p>`;
+  if (!S.play.rated) return out;
+  if (S.play.unrated) return out + `<p class="note">本局不计分：${esc(S.play.unrated)}。</p>`;
+  const result = res.winner < 0 ? 0.5 : res.winner === S.play.human ? 1 : 0;
+  const lv = S.prefs.level, r = GROW.recordGame({ opp: AI_RATING[lv], oppName: `AI（${LEVELS[lv].name}）`, result });
+  return `<p><b>计分对局：等级分 ${r.before} → ${r.after}（${r.delta >= 0 ? '+' : ''}${r.delta}）</b>${r.promoted ? `，升到 ${r.rankAfter}！🎉` : r.demoted ? `，降到 ${r.rankAfter}。` : `，现在是 ${r.rankAfter}。`}${r.msgs.map(esc).join(' ')}${r.provisional ? '（定级赛）' : ''}</p>` + out;
+}
+
+function growthAbandon() {
+  const g = S.play;
+  if (!g || !g.rated || g.unrated || g.done || g.result || g.moves.length < 10 || pvp()) return;
+  g.done = true;
+  const lv = S.prefs.level, r = GROW.recordGame({ opp: AI_RATING[lv], oppName: `AI（${LEVELS[lv].name}）`, result: 0, note: '中途放弃' });
+  toast(`上一盘计分对局中途放弃，按输计算：${r.delta} 分`);
+}
+
+function growthRecommend(cat) {
+  const conf = CC_CATS[cat] || { lessons: [], kinds: [] }, out = [];
+  for (const kw of conf.lessons) {
+    const li = DATA.lessons.findIndex(l => l.title.includes(kw) && !S.done.lessons[l.id]);
+    if (li >= 0 && !out.some(o => o.li === li)) out.push({ li, label: DATA.lessons[li].title });
+    if (out.length >= 2) break;
+  }
+  for (const k of conf.kinds) {
+    const pi = DATA.puzzles.findIndex(z => z.kind === k && !S.done.puzzles[z.id]);
+    if (pi >= 0) { out.push({ pi, label: `练习：${KIND[k]}` }); break; }
+  }
+  return out;
+}
+
+function growthHtml() {
+  let h = `<div class="cm game growth">${GROW.rankCard()}${GROW.chart()}</div>`;
+  if (GROW.justCompleted) { GROW.justCompleted = false; toast('今天的训练全部完成！'); }
+  h += `<div class="cm"><div class="h"><b>今日训练</b>${GROW.s.days ? `<span class="wr">已连续 ${GROW.s.days} 天</span>` : ''}</div>${GROW.planHtml()}</div>`;
+  const weak = GROW.topWeak(3);
+  h += '<div class="cm"><div class="h"><b>我的弱点</b><span class="wr">根据对局里的失误统计</span></div>';
+  if (!weak.length) h += '<p class="note">和 AI 下几盘完整的对局（开着“讲解”），这里会统计你最常犯的错误类型，并推荐对应的课和题。</p>';
+  else h += '<ul class="g-weak">' + weak.map(w => `<li><b>${esc(w.c)}</b>（${w.v}）${growthRecommend(w.c).map(r => ` <button class="small" data-g="${r.li !== undefined ? `lesson:${r.li}` : `puzzle:${r.pi}`}">${esc(r.label)}</button>`).join('')}</li>`).join('') + '</ul>';
+  h += '</div>';
+  const due = GROW.dueReviews().length;
+  h += `<div class="cm"><div class="h"><b>错题本</b><span class="wr">共 ${GROW.s.review.length} 题，今天到期 ${due} 题</span></div><p>${due ? '<button class="small primary" data-g="review">开始复习</button>' : '<span class="note">没有到期的错题。</span>'}</p></div>`;
+  const log = GROW.logHtml();
+  if (log) h += `<div class="cm"><div class="h"><b>最近的计分对局</b></div>${log}</div>`;
+  h += `<div class="cm"><div class="h"><b>积分与升降级规则</b></div>${GrowthUtil.RULES_HTML}</div>`;
+  return h;
+}
+
+function growthStartReview() {
+  const due = GROW.dueReviews();
+  if (!due.length) { toast('现在没有到期的错题，做几道新题吧'); return; }
+  const it = due[0];
+  if (it.kind === 'puzzle') {
+    const i = DATA.puzzles.findIndex(z => z.id === it.pid);
+    if (i < 0) { GROW.reviewResult(it.id, true); growthStartReview(); return; }
+    PZ.custom = null;
+    S.practice.pi = i;
+  } else PZ.custom = { id: it.id, kind: 'fix', fen: it.fen, best: it.best, score: it.score, title: it.title };
+  PZ.reviewId = it.id;
+  if (S.mode !== 'practice') { S.mode = 'growth'; setMode('practice'); } else loadPuzzle();
+  toast('错题复习：做对就算过关');
+}
+
+function growthAction(a) {
+  if (a === 'review') { growthStartReview(); return; }
+  if (a === 'puzzle') {
+    const i = DATA.puzzles.findIndex(z => !S.done.puzzles[z.id]);
+    PZ.custom = null; PZ.reviewId = null;
+    if (i >= 0) S.practice.pi = i;
+    setMode('practice');
+    return;
+  }
+  if (a === 'game') { setMode('play'); $('btnNew').click(); return; }
+  if (a.startsWith('lesson:')) { S.learn = { li: +a.slice(7), si: 0 }; setMode('learn'); $('selLesson').value = String(S.learn.li); loadStep(); return; }
+  if (a.startsWith('puzzle:')) { PZ.custom = null; PZ.reviewId = null; S.practice.pi = +a.slice(7); setMode('practice'); }
+}
+
 function undo() {
   if (!S.play.moves.length) return;
+  unrate('用了悔棋');
   eng.cancel();
   gen++;
   aiBusy = false;
@@ -564,6 +689,7 @@ function undo() {
 
 async function showHint() {
   if (!canHumanMove()) return;
+  unrate('用了提示');
   const k = S.play.moves.length, g = gen;
   toast('正在计算…');
   const a = await getAnalysis(k);
@@ -764,9 +890,18 @@ function gamesHtml() {
 
 // ---------------- 练习 ----------------
 
-const KIND = { mate1: '一步杀', mate2: '两步杀', mate3: '三步杀', win: '得子' };
+const KIND = { mate1: '一步杀', mate2: '两步杀', mate3: '三步杀', win: '得子', fix: '改错' };
 const PZ = { pos: null, last: null, waiting: false, side: 0, left: 0, fb: '', state: '', arrows: null, marks: null, moves: [], hints: 0 };
-function puzzle() { return DATA.puzzles[S.practice.pi]; }
+function puzzle() { return PZ.custom || DATA.puzzles[S.practice.pi]; }
+/** 做题结果计入练习积分、错题本、每日训练 */
+function gradePuzzle(ok) {
+  const z = puzzle();
+  if (!z || PZ.graded) return;
+  PZ.graded = true;
+  const fresh = !z.id.startsWith('fix') && !S.done.puzzles[z.id] && !PZ.reviewId;
+  GROW.recordPuzzle(PZ_RATING[z.kind] || 1000, ok, fresh);
+  if (PZ.reviewId) { toast(GROW.reviewResult(PZ.reviewId, ok)); PZ.reviewId = null; } else if (!ok) GROW.addReview({ id: `pz-${z.id}`, kind: 'puzzle', pid: z.id, title: `练习题 ${KIND[z.kind]}` });
+}
 function loadPuzzle() {
   const z = puzzle();
   sel = -1;
@@ -774,6 +909,7 @@ function loadPuzzle() {
   PZ.pos = R.fromFEN(z.fen);
   PZ.side = PZ.pos.turn; PZ.last = null; PZ.waiting = true; PZ.fb = ''; PZ.state = 'solving'; PZ.arrows = null; PZ.marks = null; PZ.moves = []; PZ.hints = 0;
   PZ.left = z.kind === 'mate2' ? 2 : z.kind === 'mate3' ? 3 : 1;
+  PZ.graded = false;
   save();
   render();
 }
@@ -793,6 +929,11 @@ async function puzzleMove(u) {
   render();
   const r = await eng.run(z.fen, PZ.moves, { ms: 900 });
   if (!r || g !== gen || puzzle() !== z) return;
+  if (z.kind === 'fix') {
+    const got = -r.score;
+    if (u === z.best || got >= z.score - 80) return puzzleSolved(`${name}。比实战好多了（引擎评估：${scoreText(got, SIDE_SHORT[PZ.side])}）。`);
+    return puzzleFailed(name);
+  }
   if (z.kind === 'win') {
     const got = -r.score;
     if (got >= Math.min(z.score - 90, 250)) return puzzleSolved(`${name}。这样能赢得子力（引擎评估：${scoreText(got, SIDE_SHORT[PZ.side])}）。`);
@@ -820,13 +961,15 @@ function puzzleSolved(msg) {
   const z = puzzle();
   PZ.state = 'solved'; PZ.waiting = false;
   PZ.fb = `<p class="feedback ok">正确！${esc(msg)}</p>`;
-  if (!S.done.puzzles[z.id]) { S.done.puzzles[z.id] = true; fillPuzzles(); }
+  gradePuzzle(true);
+  if (!PZ.custom && !S.done.puzzles[z.id]) { S.done.puzzles[z.id] = true; fillPuzzles(); }
   save();
   render();
 }
 function puzzleFailed(name) {
   const z = puzzle(), p0 = R.fromFEN(z.fen), bm = R.parseUci(p0, z.best);
   PZ.state = 'failed'; PZ.waiting = false;
+  gradePuzzle(false);
   PZ.fb = `<p class="feedback no">${esc(name)} 不是正解。</p><p>正解第一步：<b>${esc(moveLabel(p0, bm))}</b>。</p><ul>${R.describe(p0, bm).map(r => `<li>${esc(r)}</li>`).join('')}</ul><p class="note">点“重做”再试一次。</p>`;
   render();
 }
@@ -850,7 +993,8 @@ function puzzleHtml() {
   const z = puzzle();
   if (!z) return '<p class="empty">还没有练习题。</p>';
   const done = Object.keys(S.done.puzzles).length;
-  let h = `<div class="cm game"><div class="h"><span class="pz-kind">${KIND[z.kind]}</span><b>第 ${S.practice.pi + 1} 题</b><span class="wr">已完成 ${done} / ${DATA.puzzles.length}</span></div>`;
+  let h = `<div class="cm game"><div class="h"><span class="pz-kind">${KIND[z.kind]}</span><b>${PZ.custom ? esc(z.title) : `第 ${S.practice.pi + 1} 题`}</b><span class="wr">${PZ.reviewId ? '错题复习' : `已完成 ${done} / ${DATA.puzzles.length}`}</span></div>`;
+  if (z.kind === 'fix') return h + `<p>${SIDES[PZ.side]}走。这是你对局里下错的局面，找一步更好的棋。</p>` + PZ.fb + '</div>';
   h += `<p>${SIDES[PZ.side]}先走，${z.kind === 'win' ? '找到能得子（赢得子力）的一步。' : `${z.kind === 'mate1' ? '一步' : z.kind === 'mate2' ? '两步之内' : '三步之内'}${IS_CHESS ? '将死' : '杀死'}对方。`}${z.src ? `<span class="note">（${esc(z.src)}）</span>` : ''}</p>`;
   return h + PZ.fb + '</div>';
 }
@@ -882,7 +1026,7 @@ function movesHtml(names, cur, clickable, marks) {
 
 function render() {
   const mode = S.mode;
-  for (const [id, m] of [['tabPlay', 'play'], ['tabLearn', 'learn'], ['tabGames', 'games'], ['tabPractice', 'practice']]) $(id).classList.toggle('on', mode === m);
+  for (const [id, m] of [['tabPlay', 'play'], ['tabLearn', 'learn'], ['tabGames', 'games'], ['tabPractice', 'practice'], ['tabGrowth', 'growth']]) $(id).classList.toggle('on', mode === m);
   $('playBar').hidden = mode !== 'play';
   $('viewBar').hidden = !(mode === 'play' && view !== null);
   $('learnBar').hidden = mode !== 'learn';
@@ -941,6 +1085,10 @@ function render() {
       moves = movesHtml(gameNames(g).map(n => n.san), S.games.idx, true);
     }
     $('btnGAuto').textContent = GS.auto ? '停止播放' : '自动播放';
+  } else if (mode === 'growth') {
+    status = `成长 · ${GROW.rank.name} · 等级分 ${GROW.s.rating}`;
+    setWr('', null, '');
+    coach = growthHtml();
   } else {
     const z = puzzle();
     status = z ? `${SIDES[PZ.side]}先走 · ${KIND[z.kind]}` : '';
@@ -985,20 +1133,29 @@ $('tabPlay').addEventListener('click', () => setMode('play'));
 $('tabLearn').addEventListener('click', () => setMode('learn'));
 $('tabGames').addEventListener('click', () => setMode('games'));
 $('tabPractice').addEventListener('click', () => setMode('practice'));
+$('tabGrowth').addEventListener('click', () => setMode('growth'));
+document.addEventListener('click', e => { const g = e.target.closest('[data-g]'); if (g) growthAction(g.dataset.g); });
 
 const dlgNew = $('dlgNew'), fNew = dlgNew.querySelector('form');
 fNew.side.innerHTML = `<option value="0">${SIDES[0]}（先走）</option><option value="1">${SIDES[1]}（后走）</option>`;
 fNew.level.innerHTML = LEVELS.map((l, i) => `<option value="${i}">${l.name}${l.note ? `（${l.note}）` : ''}</option>`).join('');
 $('levelNote').textContent = IS_CHESS ? '引擎完全离线运行。“入门”“初级”会故意走一些软着，适合练习。' : '引擎完全离线运行。“入门”“初级”会故意走一些软着，适合练习。本程序把长将、长捉等重复局面都按和棋处理。';
 $('btnNew').addEventListener('click', () => {
-  fNew.opp.value = S.play.opp; fNew.side.value = String(S.play.human); fNew.level.value = String(S.prefs.level);
+  const rec = recommendLevel();
+  fNew.opp.value = S.play.opp; fNew.side.value = String(S.play.human);
+  fNew.level.value = String(S.prefs.autoLevel === false ? S.prefs.level : rec);
+  fNew.rated.checked = S.prefs.rated !== false;
+  $('levelRec').textContent = `你现在是 ${GROW.rank.name}（等级分 ${GROW.s.rating}），推荐难度：${LEVELS[rec].name}。`;
   dlgNew.returnValue = '';
   dlgNew.showModal();
 });
 dlgNew.addEventListener('close', () => {
   const rv = dlgNew.returnValue;
   if (rv !== 'ok' && rv !== 'apply') return;
+  if (rv === 'apply' && +fNew.level.value !== S.prefs.level) unrate('中途改了难度');
+  S.prefs.autoLevel = +fNew.level.value === recommendLevel();
   S.prefs.level = +fNew.level.value;
+  S.prefs.rated = fNew.rated.checked;
   if (rv === 'apply') { save(); render(); toast('难度已更新'); return; }
   newGame({ opp: fNew.opp.value, human: +fNew.side.value });
 });
@@ -1047,9 +1204,13 @@ $('btnGAuto').addEventListener('click', () => {
 });
 $('rngGame').addEventListener('input', e => { stopAuto(); gameGo(+e.target.value); });
 
-$('selPuzzle').addEventListener('change', e => { gen++; S.practice.pi = +e.target.value; loadPuzzle(); });
-$('btnPzPrev').addEventListener('click', () => { gen++; S.practice.pi = Math.max(0, S.practice.pi - 1); $('selPuzzle').value = String(S.practice.pi); loadPuzzle(); });
-$('btnPzNext').addEventListener('click', () => { gen++; S.practice.pi = Math.min(DATA.puzzles.length - 1, S.practice.pi + 1); $('selPuzzle').value = String(S.practice.pi); loadPuzzle(); });
+$('selPuzzle').addEventListener('change', e => { gen++; PZ.custom = null; PZ.reviewId = null; S.practice.pi = +e.target.value; loadPuzzle(); });
+$('btnPzPrev').addEventListener('click', () => { gen++; PZ.custom = null; PZ.reviewId = null; S.practice.pi = Math.max(0, S.practice.pi - 1); $('selPuzzle').value = String(S.practice.pi); loadPuzzle(); });
+$('btnPzNext').addEventListener('click', () => {
+  gen++;
+  // 复习中：“下一题”接着复习下一道到期的错题
+  if (PZ.reviewId === null && PZ.custom && GROW.dueReviews().length) { growthStartReview(); return; }
+  PZ.custom = null; PZ.reviewId = null; S.practice.pi = Math.min(DATA.puzzles.length - 1, S.practice.pi + 1); $('selPuzzle').value = String(S.practice.pi); loadPuzzle(); });
 $('btnPzRetry').addEventListener('click', () => { gen++; loadPuzzle(); });
 $('btnPzHint').addEventListener('click', puzzleHint);
 

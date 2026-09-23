@@ -25,6 +25,7 @@
       <button id="tabStudy" role="tab">学习</button>
       <button id="tabGames" role="tab">棋谱</button>
       <button id="tabPractice" role="tab">练习</button>
+      <button id="tabGrowth" role="tab">成长</button>
     </div>
     <button id="btnUser" class="small user-chip">我</button>
     <button id="btnSync" class="small">同步</button>
@@ -162,8 +163,11 @@
       </select>
     </label>
     <label class="row">AI 引擎 <select name="engine"></select></label>
+    <label class="chip"><input type="checkbox" name="home">在家时用 Mac 上的 KataGo 最强网络</label>
     <p class="note" id="engineStatus"></p>
     <label class="row">AI 难度 <select name="level"></select></label>
+    <p class="note" id="levelRec"></p>
+    <label class="chip"><input type="checkbox" name="rated">计分对局（赢了加分、输了扣分；悔棋、提示会改为不计分）</label>
     <label class="row">AI 胜率控制
       <input name="target" type="range" min="20" max="100" step="5">
       <b id="targetText"></b>
@@ -333,6 +337,7 @@
 <input id="fileImport" type="file" accept="application/json,.json" hidden>
 
 <script src="menu.js"></script>
+<script src="growth.js"></script>
 <script src="engine.js"></script>
 <script src="games.js"></script>
 <script src="problems.js"></script>
