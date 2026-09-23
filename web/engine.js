@@ -668,9 +668,148 @@ function goEngine(root) {
     return R;
   }
 
+  // ---------- 局部死活/吃子计算（练习题判题、吃子棋 AI 用） ----------
+
+  function groupLibs(b, p) {
+    const g = b.group(p), libs = new Set();
+    for (const s of g.stones) for (const d of b.dir) if (b.b[s + d] === EMPTY) libs.add(s + d);
+    return { stones: g.stones, libs: [...libs] };
+  }
+
+  function candidates(b, target, wide, forDefender) {
+    const { stones, libs } = groupLibs(b, target), out = new Set(libs);
+    if (forDefender) {
+      // 防守方还可以提掉紧贴着自己、只剩一口气的对方棋子
+      const own = b.b[target];
+      for (const s of stones) for (const d of b.dir) {
+        const q = s + d;
+        // 提掉只剩一口气的对方棋子；对杀时还可以反过来紧对方的气（对方只有两口气时）
+        if (b.b[q] === 3 - own) { const g = groupLibs(b, q); if (g.libs.length <= 2) g.libs.forEach(l => out.add(l)); }
+      }
+    }
+    if (wide) for (const l of libs) for (const d of b.dir) if (b.b[l + d] === EMPTY) out.add(l + d);
+    return [...out];
+  }
+
+  /** 进攻方走：depth 手之内能否提掉 target 所在的棋块。能则返回着法序列，否则 null。 */
+  function attack(b, target, depth, wide) {
+    if (b.b[target] === EMPTY) return [];
+    if (depth <= 0) return null;
+    // 长距离追杀（征子）只看连续叫吃：对方已有 3 口气以上就算逃出
+    if (!wide && depth > 20 && groupLibs(b, target).libs.length >= 3) return null;
+    const a = b.toPlay;
+    for (const m of candidates(b, target, wide, false)) {
+      if (!b.isLegal(m, a)) continue;
+      const c = b.copy();
+      c.play(m);
+      if (c.b[target] === EMPTY) return [m];
+      const r = defend(c, target, depth - 1, wide);
+      if (r) return [m, ...r];
+    }
+    return null;
+  }
+
+  /** 防守方走：如果所有防守都失败，返回（抵抗最久的）着法序列；只要有一种防守成立就返回 null。 */
+  function defend(b, target, depth, wide) {
+    if (b.b[target] === EMPTY) return [];
+    if (groupLibs(b, target).libs.length >= 4 || depth <= 0) return null;
+    const d = b.toPlay;
+    let pv = null, any = false;
+    for (const m of candidates(b, target, wide, true)) {
+      if (!b.isLegal(m, d)) continue;
+      any = true;
+      const c = b.copy();
+      c.play(m);
+      const r = attack(c, target, depth - 1, wide);
+      if (!r) return null;
+      if (!pv || r.length > pv.length - 1) pv = [m, ...r];
+    }
+    if (!any) {
+      const c = b.copy();
+      c.play(PASS);
+      const r = attack(c, target, depth - 1, wide);
+      return r ? [PASS, ...r] : null;
+    }
+    return pv;
+  }
+
+  /** 防守方走：找一手能让 target 不被提掉的棋。 */
+  function findDefense(b, target, depth, wide) {
+    if (b.b[target] === EMPTY) return null;
+    for (const m of candidates(b, target, wide, true)) {
+      if (!b.isLegal(m, b.toPlay)) continue;
+      const c = b.copy();
+      c.play(m);
+      if (!attack(c, target, depth - 1, wide)) return m;
+    }
+    return null;
+  }
+
+  /** 吃子棋 AI：能吃就吃，被叫吃就逃，能征吃就叫吃，否则找一手不送死、又能紧对方气的棋。 */
+  function captureMove(b, rnd, level) {
+    const me = b.toPlay, op = 3 - me, seen = new Set();
+    const groups = [];
+    for (let p = 0; p < b.size; p++) {
+      const v = b.b[p];
+      if ((v !== BLACK && v !== WHITE) || seen.has(p)) continue;
+      const g = groupLibs(b, p);
+      g.stones.forEach(s => seen.add(s));
+      groups.push({ color: v, p, ...g });
+    }
+    const legal = m => m >= 0 && b.b[m] === EMPTY && b.isLegal(m, me);
+    const safe = m => legal(m) && !b.isSelfAtari(m, me);
+    const sloppy = level === 0 && rnd(100) < 35;
+    // 1. 提子
+    let best = null;
+    for (const g of groups) {
+      if (g.color === op && g.libs.length === 1 && legal(g.libs[0]) && (!best || g.stones.length > best.n)) best = { m: g.libs[0], n: g.stones.length };
+    }
+    if (best) return best.m;
+    // 2. 自己被叫吃：逃，或者提掉叫吃的子
+    if (!sloppy) {
+      for (const g of groups) {
+        if (g.color !== me || g.libs.length !== 1) continue;
+        const l = g.libs[0];
+        if (safe(l)) {
+          const c = b.copy();
+          c.play(l);
+          c.toPlay = op;
+          if (!attack(c, l, 12, false)) return l;
+        }
+      }
+    }
+    // 3. 叫吃对方，而且对方逃不掉（征子等）
+    if (!sloppy) {
+      for (const g of groups) {
+        if (g.color !== op || g.libs.length !== 2) continue;
+        const r = attack(b, g.p, level >= 2 ? 16 : 8, false);
+        if (r && safe(r[0])) return r[0];
+      }
+    }
+    // 4. 其它：靠近棋子、不送死；优先紧对方气少的棋
+    const scored = [];
+    for (let p = 0; p < b.size; p++) {
+      if (!safe(p)) continue;
+      let s = rnd(10);
+      for (const d of b.dir) {
+        const v = b.b[p + d];
+        if (v === op) { const g = groupLibs(b, p + d); s += 30 / g.libs.length; }
+        else if (v === me) { const g = groupLibs(b, p + d); if (g.libs.length <= 2) s += 15; }
+      }
+      const x = b.x(p), y = b.y(p), line = Math.min(x, y, b.n - 1 - x, b.n - 1 - y);
+      if (line === 0) s -= 8;
+      scored.push({ p, s });
+    }
+    if (!scored.length) return PASS;
+    scored.sort((u, v) => v.s - u.s);
+    const top = sloppy ? scored.slice(0, 8) : scored.slice(0, 2);
+    return top[rnd(top.length)].p;
+  }
+
   root.Go = {
     EMPTY, BLACK, WHITE, BORDER, PASS, NONE, RESIGN, LETTERS,
     Board, searchOne, ownershipSum, guessDead, Scoring, handicapPoints, explain, makeRng,
+    groupLibs, attack, defend, findDefense, captureMove,
   };
 }
 

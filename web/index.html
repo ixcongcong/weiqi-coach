@@ -21,41 +21,50 @@
     <h1>围棋对战教练</h1>
     <div class="tabs" role="tablist">
       <button id="tabPlay" role="tab">对战</button>
-      <button id="tabStudy" role="tab">棋谱</button>
+      <button id="tabStudy" role="tab">学习</button>
+      <button id="tabPractice" role="tab">练习</button>
     </div>
     <b id="wrText"></b>
-    <button id="btnHelp" class="small" >说明</button>
+    <button id="btnHelp" class="small">说明</button>
   </header>
 
   <section id="boardWrap">
     <canvas id="board" aria-label="棋盘"></canvas>
-    <div id="viewBanner" hidden>
-      <span id="viewText"></span>
-      <button id="btnBackLive" class="small primary">回到对局</button>
-    </div>
   </section>
 
   <aside id="side">
     <div id="status"></div>
 
-    <!-- 对战工具栏 -->
+    <!-- 对战 -->
     <div id="playBar" class="bar">
       <button id="btnNew">新局</button>
       <button id="btnUndo">悔棋</button>
       <button id="btnPass">停一手</button>
       <button id="btnHint" class="primary">提示</button>
       <button id="btnOwn">形势</button>
+      <button id="btnReview">回看</button>
       <button id="btnAsk" class="ask-btn">提问</button>
-      <button id="btnResign" class="wide-only">认输</button>
-      <label class="chip wide-only"><input type="checkbox" id="chkCoach">讲解</label>
-      <label class="chip wide-only"><input type="checkbox" id="chkCands">推荐点</label>
-      <label class="chip wide-only"><input type="checkbox" id="chkConfirm">确认落子</label>
-      <button id="btnMore" class="narrow-only">更多</button>
+      <button id="btnResign">认输</button>
+      <label class="chip"><input type="checkbox" id="chkCoach">讲解</label>
+      <label class="chip"><input type="checkbox" id="chkHelper">新手辅助</label>
+      <label class="chip"><input type="checkbox" id="chkCands">推荐点</label>
+      <label class="chip"><input type="checkbox" id="chkConfirm">确认落子</label>
     </div>
 
-    <!-- 棋谱工具栏 -->
+    <!-- 回看（不改变对局） -->
+    <div id="reviewBar" class="bar review" hidden>
+      <b id="reviewText"></b>
+      <button id="btnRvPrev">上一步</button>
+      <button id="btnRvNext">下一步</button>
+      <button id="btnRvClear">清除试下</button>
+      <button id="btnRvBack" class="primary">回到当前</button>
+    </div>
+
+    <!-- 学习：课程与棋谱 -->
     <div id="studyBar" class="bar" hidden>
       <select id="selGame"></select>
+      <button id="btnLsPrev">上一课</button>
+      <button id="btnLsNext" class="primary">下一课</button>
       <button id="btnFirst">第一手</button>
       <button id="btnPrev">上一手</button>
       <button id="btnNext" class="primary">下一手</button>
@@ -64,6 +73,16 @@
       <button id="btnGuess">猜棋</button>
       <button id="btnAsk2" class="ask-btn">提问</button>
       <input id="rngMove" type="range" min="0" value="0" aria-label="跳到第几手">
+    </div>
+
+    <!-- 练习 -->
+    <div id="practiceBar" class="bar" hidden>
+      <select id="selProblem"></select>
+      <button id="btnPbPrev">上一题</button>
+      <button id="btnPbNext" class="primary">下一题</button>
+      <button id="btnPbRetry">重做</button>
+      <button id="btnPbTip">提示</button>
+      <button id="btnPbAnswer">看答案</button>
     </div>
 
     <div id="askPanel" class="cm ask" hidden>
@@ -94,6 +113,14 @@
 <dialog id="dlgNew">
   <form method="dialog">
     <h2>对局设置</h2>
+    <label class="row">玩法
+      <select name="rule">
+        <option value="normal">正式对局（围地盘，数子定胜负）</option>
+        <option value="capture1">吃子棋：先吃到 1 个子获胜</option>
+        <option value="capture3">吃子棋：先吃到 3 个子获胜</option>
+        <option value="capture5">吃子棋：先吃到 5 个子获胜</option>
+      </select>
+    </label>
     <label class="row">棋盘
       <select name="size">
         <option value="9">9 路（推荐入门）</option>
@@ -123,7 +150,7 @@
       <input name="target" type="range" min="20" max="100" step="5">
       <b id="targetText"></b>
     </label>
-    <p class="note">胜率控制：100 = AI 全力下；调低后 AI 会挑选让自己胜率接近设定值的下法（越低越让着你）。</p>
+    <p class="note">吃子棋是刚学围棋时最好的练习：不用管地盘，谁先吃到规定数量的子谁赢，专门练习“气”和吃子。<br>胜率控制：100 = AI 全力下；调低后 AI 会挑选让自己胜率接近设定值的下法（越低越让着你）。</p>
     <menu>
       <button value="cancel">取消</button>
       <button value="apply">只改 AI 设置</button>
@@ -133,17 +160,23 @@
   </form>
 </dialog>
 
-<dialog id="dlgMore">
+<dialog id="dlgWelcome">
   <form method="dialog">
-    <h2>更多</h2>
-    <div class="more-list">
-      <label class="chip"><input type="checkbox" id="chkCoach2">讲解每一手</label>
-      <label class="chip"><input type="checkbox" id="chkCands2">显示 AI 推荐点</label>
-      <label class="chip"><input type="checkbox" id="chkConfirm2">点两次确认落子</label>
-    </div>
+    <h2>欢迎！刚开始学围棋吗？</h2>
+    <p>推荐按这个顺序来，每一步都不难：</p>
+    <ol class="path">
+      <li><b>学习 → 《弈》第 1、2 阶段</b>：认识棋盘、气、提子、禁着点、打劫，每课 10 分钟左右，课后有练习。</li>
+      <li><b>练习 → 第 1 级</b>：吃子入门题，边做边巩固。</li>
+      <li><b>对战 → 吃子棋</b>：先吃到子的一方赢，练习对“气”的感觉。</li>
+      <li><b>学习 → 《弈》第 3、4 阶段</b>：吃子手筋和死活对杀，配合“动画演示课”和第 2、3 级练习。</li>
+      <li><b>对战 → 9 路正式对局</b>：难度选“入门”，打开“讲解”和“新手辅助”，下完点“回看”复盘。</li>
+      <li><b>学习 → 名局</b>：先看 9 路职业对局，打开“猜棋”先想再看。</li>
+    </ol>
+    <p class="note">以后随时可以点右上角“说明”再看这份路线。</p>
     <menu>
-      <button value="resign" id="btnResign2">认输</button>
-      <button value="close" class="primary">关闭</button>
+      <button value="play">直接下棋</button>
+      <button value="practice">先做练习</button>
+      <button value="learn" class="primary">从第一课开始</button>
     </menu>
   </form>
 </dialog>
@@ -152,33 +185,51 @@
   <form method="dialog">
     <h2>使用说明</h2>
     <div class="help">
+      <h3>推荐学习路线（刚开始学）</h3>
+      <ol>
+        <li>学习 → 《弈》第 1、2 阶段（认识棋盘、气、提子、禁着点、打劫）</li>
+        <li>练习 → 第 1 级吃子题</li>
+        <li>对战 → 新局 → 玩法选“吃子棋”</li>
+        <li>学习 → 《弈》第 3、4 阶段（吃子手筋、死活对杀），练习第 2、3 级</li>
+        <li>对战 → 9 路正式对局（入门难度，打开讲解和新手辅助）</li>
+        <li>学习 → 名局（先看 9 路，打开猜棋）</li>
+      </ol>
       <h3>对战</h3>
       <ul>
-        <li><b>落子</b>：手指按住棋盘会出现半透明的预览子和蓝色十字线，松开即落子。怕点错可以勾选“确认落子”（手机在“更多”里），点两次才落子。</li>
-        <li><b>讲解</b>：每下一手，下方会出现点评——这手是 最佳 / 好棋 / 可以 / 缓手 / 恶手，原因是什么；下得不好时还会告诉你“更好的是哪里、为什么”。点任意一条点评可以回到当时的局面复盘。</li>
-        <li><b>提示</b>：告诉你推荐下在哪里、为什么，棋盘上的数字是走那里之后的胜率。</li>
-        <li><b>形势</b>：在棋盘上显示双方大致的地盘（黑方块 / 白方块），并估算谁领先几子。</li>
-        <li><b>悔棋</b>：退回到你的上一手。</li>
+        <li><b>落子</b>：手指按住棋盘会出现半透明的预览子和蓝色十字线，松开即落子。怕点错可以勾选“确认落子”，点两次才落子。</li>
+        <li><b>新手辅助</b>：只剩一口气（被叫吃）的棋子会套上红圈；你要下一手会让自己被叫吃的棋时，会先提醒你，再点一次才下。</li>
+        <li><b>讲解</b>：每下一手都有点评——最佳 / 好棋 / 可以 / 缓手 / 恶手，原因是什么，下得不好时告诉你更好的下法。</li>
+        <li><b>回看</b>：想回到前面看看、想一想时用。可以一步步往前往后看，还可以在那个局面上“试下”几手，真正的对局不会被改变。看完点“回到当前”继续下。它和“悔棋”不同：悔棋会真的把棋退回去。</li>
+        <li><b>提示 / 形势</b>：推荐下一手；显示双方地盘并估算谁领先。</li>
+        <li><b>悔棋</b>：真正退回到你的上一手，重新下。</li>
         <li><b>停一手</b>：双方都没有好地方下时才停。双方连续停一手就终局数子，数子时点棋子可以切换死活。</li>
-        <li><b>新局</b>：选择棋盘（建议从 9 路开始）、执黑执白、让子、贴目、AI 难度，以及“AI 胜率控制”——调低后 AI 会故意放水，让比赛更有来有回。只想改难度不想重开，就点“只改 AI 设置”。</li>
+        <li><b>新局</b>：选择玩法（正式对局 / 吃子棋）、棋盘、执黑执白、让子、贴目、AI 难度，以及“AI 胜率控制”——调低后 AI 会故意放水。只想改难度，就点“只改 AI 设置”。</li>
       </ul>
-      <h3>棋谱</h3>
+      <h3>学习</h3>
       <ul>
-        <li><b>套路讲解</b>：双叫吃、征子、倒扑、打劫、布局次序等入门必学的手段，每一步都有说明，最后告诉你“实战中怎么用”。</li>
-        <li><b>经典名局</b>：耳赤之局、吴清源“三三·星·天元”、AlphaGo 第 37 手、李世石“神之一手”、当湖十局。重点手有专门的讲解，点“第 N 手”按钮可以直接跳过去。</li>
-        <li><b>下一手 / 上一手</b>：一步步前进后退；拖动滑块可以快速跳转；电脑上也可以用键盘左右方向键。<b>自动播放</b>：每 3.5 秒走一步。</li>
-        <li><b>猜棋</b>：打开后，先在棋盘上点你认为的下一手，再揭晓答案。猜错的位置会用蓝色叉号标出。这是提高棋力最有效的练习方法。</li>
+        <li><b>《弈》系统课程</b>：9 个阶段 54 课，从第一次下棋一直到中盘、定式、官子和独立实战。每课有学习目标、讲解和课后练习（点棋盘、选择、填数字、按步走），全部答对这一课就标上“已学”。题目里的数字是点位编号，点“显示编号”可以在棋盘上对照。</li>
+        <li><b>动画演示课</b>：27 课，把气、吃子手筋、死活、布局等用一步步的动画演示出来，适合配合《弈》的对应章节看。</li>
+        <li><b>名局</b>：9 路、13 路、19 路职业对局，小棋盘从短的排起。19 路有耳赤之局、吴清源、聂卫平擂台赛、AlphaGo 等名局，重点手有专门讲解。</li>
+        <li><b>下一手 / 上一手</b>：一步步看；拖动滑块快速跳转；电脑上可以用键盘左右方向键。<b>自动播放</b>：每 3.5 秒走一步。</li>
+        <li><b>猜棋</b>：先在棋盘上点你认为的下一手，再揭晓答案，猜错的位置用蓝色叉号标出。</li>
+      </ul>
+      <h3>我的对局</h3>
+      <ul>
+        <li>你下的每一盘棋都会自动保存在本机（下完、认输、或者没下完就开了新局都会保存）。在“学习”列表最下面的“我的对局”里可以一步步回看，每一手都有 AI 讲解，也可以打开猜棋。</li>
+        <li>在“我的对局”里可以“导出全部对局记录”存成一个文件，换设备后“导入”合并，不会删除已有的记录。</li>
+      </ul>
+      <h3>练习</h3>
+      <ul>
+        <li>分 3 级：吃子入门、吃子技巧、对杀与死活。在棋盘上点你的答案，对了会演示完整的变化，错了会告诉你对方怎么应。</li>
+        <li>卡住了点“提示”，还不会就点“看答案”。做完的题会标上“已完成”。</li>
       </ul>
       <h3>提问</h3>
       <ul>
-        <li>点“提问”打开提问区。可以直接点问题按钮：<b>现在谁领先？</b> <b>下一手下哪里好？</b> <b>这里下怎么样？</b>（再点棋盘上一个空点，AI 试下后告诉你好坏和原因，棋盘不会变）<b>这块棋活吗？</b>（再点一块棋）<b>哪块棋最危险？</b></li>
-        <li>也可以输入文字提问，例如“什么是打劫”“怎么做活”“收官的顺序”。内置了 28 条常见的围棋知识。</li>
-        <li>引擎是离线的，不能像聊天机器人那样理解任意问题；答不上来时会告诉你可以问什么。</li>
+        <li>点“提问”可以问：<b>现在谁领先？</b> <b>下一手下哪里好？</b> <b>这里下怎么样？</b>（再点棋盘上一个空点）<b>这块棋活吗？</b>（再点一块棋）<b>哪块棋最危险？</b></li>
+        <li>也可以输入文字，例如“什么是打劫”“怎么做活”。引擎是离线的，不能像聊天机器人那样理解任意问题。</li>
       </ul>
-      <h3>关于 AI</h3>
-      <p>AI 是内置在程序里的围棋引擎（蒙特卡洛树搜索），完全离线运行，不联网，也不调用大模型。它大约是业余棋手的水平，讲解是根据胜率和地盘变化自动生成的，复杂的局面仅供参考。</p>
-      <h3>在 iPad 上更新</h3>
-      <p>联网时打开本应用，有新版本会在底部提示“新版本已下载好”，点“立即更新”即可。</p>
+      <h3>关于离线和更新</h3>
+      <p>AI 是内置在程序里的围棋引擎，完全离线运行，不联网、不调用大模型。第一次打开后，所有文件都保存在设备上，关掉以后从主屏幕图标打开照样能用，不需要一直开着。有网时打开，会自动下载新版本，底部提示“新版本已下载好”时点“立即更新”即可。</p>
     </div>
     <menu><button value="close" class="primary">知道了</button></menu>
   </form>
@@ -193,9 +244,11 @@
 </dialog>
 
 <div id="toast" hidden></div>
+<input id="fileImport" type="file" accept="application/json,.json" hidden>
 
 <script src="engine.js"></script>
 <script src="games.js"></script>
+<script src="problems.js"></script>
 <script src="faq.js"></script>
 <script src="app.js"></script>
 </body>
