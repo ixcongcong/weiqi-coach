@@ -44,7 +44,7 @@ function buildLessons(R, eng, src) {
       let p;
       if (st.fen) p = R.fromFEN(st.fen);
       else if (prev) p = R.fromFEN(prev);
-      else { fail(`${where}：没有局面`); p = R.fromFEN(R.START); }
+      else { if (st.task || st.goal || st.moves) fail(`${where}：没有局面`); p = R.fromFEN(R.START); }
       // 对方不能正处在被将军的状态
       p.turn ^= 1;
       if (R.inCheck(p)) fail(`${where}：不该走的一方正被将军，局面不合法`);
@@ -198,7 +198,14 @@ for (const [id, R] of [['chess', Chess], ['xiangqi', Xiangqi]]) {
   console.log(`  课程 ${lessons.length} 课，${lessons.reduce((n, l) => n + l.steps.length, 0)} 步`);
   const games = buildGames(R, require(`./games-${id}.js`));
   console.log(`  棋谱 ${games.length} 局`);
-  const puzzles = genPuzzles(R, eng, { mate1: 14, mate2: 12, win: 14 }, id === 'chess' ? 20260924 : 90124);
+  let puzzles;
+  const old = path.join(OUT, `data-${id}.js`);
+  if (process.env.KEEP_PUZZLES && fs.existsSync(old)) {
+    // 只改了课程或棋谱时，沿用已经生成好的练习题（自我对弈生成要几分钟）
+    const win = {};
+    new Function('window', fs.readFileSync(old, 'utf8'))(win);
+    puzzles = win.CC_DATA[id].puzzles;
+  } else puzzles = genPuzzles(R, eng, { mate1: 14, mate2: 12, win: 14 }, id === 'chess' ? 20260924 : 90124);
   console.log(`  练习 ${puzzles.length} 题`);
   const data = { lessons, puzzles, games };
   fs.writeFileSync(path.join(OUT, `data-${id}.js`),
