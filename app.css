@@ -240,3 +240,16 @@ dialog menu { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8p
 .help ul { margin: 0; padding-left: 18px; }
 .help li { margin: 3px 0; }
 .help p { margin: 4px 0; }
+
+.ask-btn { border-color: var(--blue); color: var(--blue); }
+.ask-btn.on { background: #e3eefc; }
+.cm.ask { border-left-color: var(--blue); }
+.cm.ask .h button { margin-left: 6px; }
+.ask-chips { display: flex; flex-wrap: wrap; gap: 5px; margin: 6px 0; }
+.ask-chips button { font-size: 13px; padding: 3px 9px; font-weight: 500; }
+.ask-chips button.on { border-color: var(--blue); background: #e3eefc; }
+.ask-form { display: flex; gap: 6px; }
+.ask-form input { flex: 1; min-width: 0; font: inherit; font-size: 14px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 8px; background: #fff; color: var(--ink); }
+#askAnswer:not(:empty) { margin-top: 8px; padding-top: 6px; border-top: 1px dashed var(--line); }
+#askAnswer .q { color: var(--blue); font-weight: 600; }
+@media (min-aspect-ratio: 1/1) { #askPanel { max-height: 45%; overflow-y: auto; } }
