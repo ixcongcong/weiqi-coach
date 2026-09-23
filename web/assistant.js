@@ -111,6 +111,7 @@ const INTENTS = [
   },
   {
     test: q => /目|地盘|围了|实地|空/.test(q) && !/目标|题目|节目/.test(q),
+    needsA: true,
     run(ctx, q) {
       const b = ctx.b;
       // 问“刚才/这手/得到的目” → 显示那手棋带来的点
@@ -126,7 +127,7 @@ const INTENTS = [
             <p class="note">“约多少目”是这样估出来的：引擎从下棋前、下棋后各模拟几百盘，看每个点最后归谁的比例变化了多少，加起来就是这手棋让双方目差变化的大小。它是估算，不是已经确定的地。</p>`,
         };
       }
-      if (!ctx.a) return { html: '<p>引擎还在分析这个局面，过几秒再问一次。</p>' };
+      if (!ctx.a) return { html: '<p>引擎这会儿没能分析这个局面（可能刚换了局面），请再点一次问题。</p>' };
       const mine = [], theirs = [], open = [];
       const sgn = ctx.me === BLACK ? 1 : -1;
       for (let p = 0; p < b.size; p++) {
@@ -548,6 +549,14 @@ askText = async function (text) {
     const ctx = assistantContext();
     for (const it of INTENTS) {
       if (!it.test(t)) continue;
+      if (it.needsA && ctx.getA) {
+        // 需要当前局面的引擎分析：没算完就等它算完，不让用户再问一次
+        const seq = ++Q.seq;
+        askShow(t, '<p>正在分析这个局面，马上就好…</p>', '', true);
+        const a = await ctx.getA();
+        if (seq !== Q.seq) return;
+        if (a) ctx.a = a;
+      }
       const r = it.run(ctx, t);
       if (!r) continue;
       drawBoard();
