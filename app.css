@@ -270,3 +270,8 @@ dialog menu { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8p
   .tabs button { padding: 3px 10px; }
 }
 #app { align-content: start; }
+.tabs button, #top .small { white-space: nowrap; }
+#top { flex-wrap: wrap; row-gap: 4px; }
+#dlgSync input[type=url], #dlgSync input:not([type]) { flex: 1; min-width: 0; font: inherit; font-size: 14px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 8px; }
+#dlgSync details { margin-top: 8px; }
+#dlgSync ol { padding-left: 18px; margin: 4px 0; }

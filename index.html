@@ -25,6 +25,7 @@
       <button id="tabPractice" role="tab">练习</button>
     </div>
     <b id="wrText"></b>
+    <button id="btnSync" class="small">同步</button>
     <button id="btnHelp" class="small">说明</button>
   </header>
 
@@ -228,10 +229,37 @@
         <li>点“提问”可以问：<b>现在谁领先？</b> <b>下一手下哪里好？</b> <b>这里下怎么样？</b>（再点棋盘上一个空点）<b>这块棋活吗？</b>（再点一块棋）<b>哪块棋最危险？</b></li>
         <li>也可以输入文字，例如“什么是打劫”“怎么做活”。引擎是离线的，不能像聊天机器人那样理解任意问题。</li>
       </ul>
+      <h3>同步</h3>
+      <p>点右上角“同步”，连接家里 Mac 上的“弈 · 学习中心”，选择你的用户（例如初九）。之后只要在家里的网络里打开本应用，就会自动同步：每一盘对局记录、练习进度、《弈》的课程进度都会和其它设备、《弈》App 合并，不会删除任何记录。第一次使用需要在设备上安装一次家里的证书，步骤在同步窗口里。</p>
       <h3>关于离线和更新</h3>
       <p>AI 是内置在程序里的围棋引擎，完全离线运行，不联网、不调用大模型。第一次打开后，所有文件都保存在设备上，关掉以后从主屏幕图标打开照样能用，不需要一直开着。有网时打开，会自动下载新版本，底部提示“新版本已下载好”时点“立即更新”即可。</p>
     </div>
     <menu><button value="close" class="primary">知道了</button></menu>
+  </form>
+</dialog>
+
+<dialog id="dlgSync">
+  <form method="dialog">
+    <h2>同步（家里的 Mac 学习中心）</h2>
+    <p class="note">对局记录、练习进度和《弈》的课程进度，会和家里 Mac 上的“弈 · 学习中心”合并同步（只合并，不删除任何记录）。同一个用户在 iPad、手机、《弈》App 上的进度都会汇总在一起。</p>
+    <label class="row">学习中心地址 <input id="syncServer" type="url" autocomplete="off" spellcheck="false"></label>
+    <div class="keys"><button type="button" id="btnSyncConnect">连接</button></div>
+    <label class="row" id="syncUserRow" hidden>用户 <select id="syncUser"></select></label>
+    <label class="row" id="syncNewRow" hidden>新用户名字 <input id="syncNewName" maxlength="24" placeholder="例如：初九"></label>
+    <p id="syncStatus"></p>
+    <details class="note">
+      <summary>第一次使用：在这台设备上安装家里的证书</summary>
+      <p>学习中心使用 https，需要设备信任家里 Mac 生成的根证书（每台设备只需做一次）：</p>
+      <ol>
+        <li>连上家里的 Wi-Fi，用浏览器打开 <b>http://VincentdeMac-mini.local:8766/ca.crt</b>（安卓打不开时用 http://192.168.1.9:8766/ca.crt）。</li>
+        <li><b>iPad / iPhone</b>：允许下载描述文件 → 设置 → 通用 → VPN 与设备管理 → 安装；再到 设置 → 通用 → 关于本机 → 证书信任设置，打开这个证书的开关。</li>
+        <li><b>安卓</b>：设置 → 安全 → 加密与凭据 → 安装证书 → CA 证书，选择下载的文件。</li>
+      </ol>
+    </details>
+    <menu>
+      <button value="close">关闭</button>
+      <button type="button" id="btnSyncNow" class="primary">立即同步</button>
+    </menu>
   </form>
 </dialog>
 
