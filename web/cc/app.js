@@ -469,6 +469,12 @@ async function aiMove(g) {
   const k = S.play.moves.length;
   const r = await eng.run(S.play.fen, S.play.moves, { ms: lv.ms, all: lv.temp > 0 });
   if (!r || g !== gen) return;
+  // 大势已去就认输：被杀在即，或者落后一个车以上且下了 30 手以上
+  if (r.depth >= 4 && (mateIn(r.score) < 0 && mateIn(r.score) >= -4 || (r.score < -900 && S.play.moves.length >= 30))) {
+    aiBusy = false;
+    finishGame({ winner: S.play.human, reason: 'AI 认输' });
+    return;
+  }
   let u = r.best;
   if (lv.temp > 0 && r.moves.length > 1) {
     const top = cp(r.moves[0].s);
@@ -1049,7 +1055,7 @@ function render() {
     } else setWr('', null, '');
     $('btnUndo').disabled = !S.play.moves.length;
     $('btnHint').disabled = !canHumanMove();
-    $('btnResign').disabled = !!S.play.result || pvp();
+    $('btnResign').disabled = !!S.play.result;
     $('btnHint').classList.toggle('on', !!hint);
     const list = [];
     if (hint && HINT_HTML) list.push(HINT_HTML);
@@ -1163,8 +1169,18 @@ $('btnUndo').addEventListener('click', undo);
 $('btnHint').addEventListener('click', () => { if (hint) { hint = null; render(); } else showHint(); });
 $('btnFlip').addEventListener('click', () => { S.flip = !S.flip; save(); draw(); });
 $('btnResign').addEventListener('click', () => {
-  if (S.play.result || pvp()) return;
-  finishGame({ winner: 1 - S.play.human, reason: '你认输了' });
+  if (S.play.result) return;
+  // 真人对战：轮到谁走谁认输；对 AI：你认输
+  const loser = pvp() ? playPos().turn : S.play.human;
+  $('confirmText').textContent = pvp() ? `确定${SIDES[loser]}认输吗？` : '确定要认输吗？';
+  const d = $('dlgConfirm');
+  d.returnValue = '';
+  d.onclose = () => {
+    if (d.returnValue !== 'ok' || S.play.result) return;
+    eng.cancel(); gen++; aiBusy = false;
+    finishGame({ winner: 1 - loser, reason: pvp() ? `${SIDES[loser]}认输` : '你认输了' });
+  };
+  d.showModal();
 });
 $('chkCoach').addEventListener('change', e => { S.prefs.coach = e.target.checked; save(); render(); if (S.mode === 'play') advance(); });
 $('chkThreat').addEventListener('change', e => { S.prefs.threat = e.target.checked; save(); render(); });
