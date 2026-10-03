@@ -55,12 +55,16 @@
     try { controlsExpanded = root.localStorage.getItem(`${storageKey}:controls`) === 'expanded'; } catch (e) { /* 默认收起。 */ }
     function updateControls() {
       panel.hidden = !controlsExpanded;
+      controls.hidden = !controlsExpanded;
       toggle.textContent = controlsExpanded ? '收起调节 ▴' : '显示调节 ▾';
       toggle.setAttribute('aria-expanded', String(controlsExpanded));
       toggle.setAttribute('aria-label', controlsExpanded ? '收起棋盘和文字显示调节' : '展开棋盘和文字显示调节');
     }
     for (const el of [label, less, range, pixelInput, more, value, reset, text, resetPanes]) panel.appendChild(el);
-    controls.appendChild(toggle); controls.appendChild(panel); updateControls();
+    const help = document.getElementById('btnHelp');
+    if (help?.parentElement) help.parentElement.insertBefore(toggle, help.nextSibling);
+    else wrap.appendChild(toggle);
+    controls.appendChild(panel); updateControls();
     wrap.appendChild(controls);
     toggle.addEventListener('click', () => {
       controlsExpanded = !controlsExpanded; updateControls();
@@ -69,6 +73,7 @@
     });
     const app = document.getElementById('app'), side = document.getElementById('side'), top = document.getElementById('top');
     const direction = () => root.innerWidth >= root.innerHeight ? 'landscape' : 'portrait';
+    const controlsHeight = () => controls.hidden ? 0 : (controls.offsetHeight || 44);
     let actualWidth = 0, overflowing = percent > 100;
     let divider = null;
     if (app && side) {
@@ -85,9 +90,9 @@
       const style = app && root.getComputedStyle ? root.getComputedStyle(app) : {};
       const padding = names => names.reduce((sum, name) => sum + (parseFloat(style[name]) || 0), 0);
       const length = Math.max(0, landscape
-        ? (app?.clientWidth || root.innerWidth) - padding(['paddingLeft', 'paddingRight']) - 24
-        : (app?.clientHeight || root.innerHeight) - padding(['paddingTop', 'paddingBottom']) - (top?.offsetHeight || 0) - 24);
-      const boardMinimum = Math.min(landscape ? 128 : (controls.offsetHeight || 44) + 108, Math.max(1, length - 40));
+        ? (app?.clientWidth || root.innerWidth) - padding(['paddingLeft', 'paddingRight']) - 8
+        : (app?.clientHeight || root.innerHeight) - padding(['paddingTop', 'paddingBottom']) - (top?.offsetHeight || 0) - 8);
+      const boardMinimum = Math.min(landscape ? 128 : controlsHeight() + 108, Math.max(1, length - 40));
       const max = Math.max(1, length - boardMinimum), min = Math.min(landscape ? 200 : 160, max);
       return { min, max, length };
     }
@@ -126,7 +131,7 @@
       if (linkPane && boardPixels != null && divider) {
         const axis = direction(), bounds = paneBounds();
         const aspect = previousWidth ? previousHeight / previousWidth : 1;
-        const boardLength = axis === 'landscape' ? boardPixels + 14 : boardPixels * aspect + (controls.offsetHeight || 44) + 14;
+        const boardLength = axis === 'landscape' ? boardPixels + 14 : boardPixels * aspect + controlsHeight() + 14;
         panes[axis] = Math.round(Math.max(bounds.min, Math.min(bounds.max, bounds.length - boardLength)));
         applyPane();
       }
@@ -181,7 +186,7 @@
       // client* rounds fractional grid sizes. Leave two extra pixels so a
       // subpixel overflow cannot create scrollbars and shrink a fitted board.
       const width = Math.max(1, Math.floor(wrap.clientWidth - 14));
-      const height = divider || root.innerWidth >= root.innerHeight ? Math.max(1, Math.floor(wrap.clientHeight - (controls.offsetHeight || 44) - 14)) : Math.max(100, Math.floor(root.innerHeight * portraitRatio));
+      const height = divider || root.innerWidth >= root.innerHeight ? Math.max(1, Math.floor(wrap.clientHeight - controlsHeight() - 14)) : Math.max(100, Math.floor(root.innerHeight * portraitRatio));
       return { width, height };
     }
     let previousWidth = 0, previousHeight = 0;

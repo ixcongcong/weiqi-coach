@@ -81,16 +81,18 @@ html.board-layout-page, html.board-layout-page body { height: 100%; overflow: hi
 #app.board-layout-resizable {
   height: 100dvh;
   min-height: 0;
-  grid-template-rows: auto minmax(0, 1fr) 24px minmax(0, var(--coach-pane-size, clamp(160px, 32dvh, 340px)));
+  grid-template-rows: auto minmax(0, 1fr) 8px minmax(0, var(--coach-pane-size, clamp(160px, 32dvh, 340px)));
   grid-template-areas: "top" "board" "divider" "side";
 }
 .board-layout-resizable #boardWrap { justify-content: flex-start; }
 .board-layout-resizable #side { min-height: 0; min-width: 0; overflow: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
 .board-layout-resizable #side > * { flex-shrink: 0; }
 #app.board-layout-resizable #side > #coach { flex: 0 0 auto; overflow: visible; }
-.board-pane-divider { grid-area: divider; display: flex; align-items: center; justify-content: center; cursor: row-resize; touch-action: none; user-select: none; border-radius: 6px; }
-.board-pane-divider:hover, .board-pane-divider:focus-visible { background: var(--tab); outline: 2px solid var(--accent); outline-offset: -2px; }
-.board-pane-handle { width: 54px; height: 5px; border-radius: 4px; background: var(--muted); opacity: .7; }
+.board-pane-divider { grid-area: divider; position: relative; z-index: 1; display: flex; align-items: center; justify-content: center; cursor: row-resize; touch-action: none; user-select: none; }
+.board-pane-divider::before { content: ''; position: absolute; inset: -8px 0; }
+.board-pane-divider:focus-visible { outline: none; }
+.board-pane-handle { width: 100%; height: 1px; background: var(--muted); opacity: .5; pointer-events: none; }
+.board-pane-divider:hover .board-pane-handle, .board-pane-divider:focus-visible .board-pane-handle { background: var(--accent); opacity: 1; }
 .board-pane-resizing { user-select: none; }
 
 /* 横屏（iPad 横放 / 电脑）：棋盘在左，右侧整列留给讲解 */
@@ -107,12 +109,13 @@ html.board-layout-page, html.board-layout-page body { height: 100%; overflow: hi
   #side > * { flex-shrink: 0; }
   #side > #coach { flex: 1 1 auto; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; }
   #app.board-layout-resizable {
-    grid-template-columns: minmax(0, 1fr) 24px minmax(0, var(--coach-pane-size, clamp(200px, 36vw, 460px)));
+    grid-template-columns: minmax(0, 1fr) 8px minmax(0, var(--coach-pane-size, clamp(200px, 36vw, 460px)));
     grid-template-rows: auto minmax(0, 1fr);
     grid-template-areas: "board divider top" "board divider side";
   }
   .board-pane-divider { cursor: col-resize; }
-  .board-pane-handle { width: 5px; height: 54px; }
+  .board-pane-divider::before { inset: 0 -8px; }
+  .board-pane-handle { width: 1px; height: 100%; }
 }
 
 #top {
@@ -149,6 +152,7 @@ html.board-layout-page, html.board-layout-page body { height: 100%; overflow: hi
 .board-display-controls input[type=number] { width: 68px; min-width: 0; padding: 4px; border: 1px solid var(--line); border-radius: 6px; background: var(--field); color: var(--ink); font: inherit; }
 .board-display-controls output { min-width: 3.2em; font-variant-numeric: tabular-nums; text-align: center; }
 .board-display-controls button { min-height: 34px; }
+.board-display-controls[hidden] { display: none; }
 .board-display-panel { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 6px; width: 100%; }
 .board-display-panel[hidden] { display: none; }
 #boardDisplayToggle { min-height: 28px; padding: 3px 10px; font-size: 12px; }

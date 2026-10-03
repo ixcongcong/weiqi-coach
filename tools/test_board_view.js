@@ -56,6 +56,7 @@ function boardHarness({ key = 'go', width = 393, height = 852, stored = new Map(
     set id(id) { this._id = id; elements.set(id, this); }
     get id() { return this._id || ''; }
     get parentNode() { return this.parentElement; }
+    get nextSibling() { return this.parentElement?.children[this.parentElement.children.indexOf(this) + 1] || null; }
     appendChild(child) {
       if (child.parentElement) child.parentElement.removeChild(child);
       this.children.push(child); child.parentElement = this;
@@ -100,6 +101,7 @@ function boardHarness({ key = 'go', width = 393, height = 852, stored = new Map(
   const root = new Element('html');
   const app = new Element('main'); app.id = 'app'; app.clientWidth = width; app.clientHeight = height;
   const top = new Element('header'); top.id = 'top'; top.clientWidth = width; top.clientHeight = top.offsetHeight = 56;
+  const help = new Element('button'); help.id = 'btnHelp'; top.appendChild(help);
   const side = new Element('aside'); side.id = 'side'; side.clientWidth = 340; side.clientHeight = 280;
   app.append(top, wrap, side); root.append(app);
   // A real grid updates the pane rectangle synchronously when its CSS size
@@ -164,6 +166,8 @@ test('display controls default collapsed, toggle accessibly and remember state f
     assert.equal(panel.hidden, true);
     assert.equal(toggle.getAttribute('aria-expanded'), 'false');
     assert.equal(toggle.getAttribute('aria-controls'), panel.id);
+    assert.equal(h.get('btnHelp').nextSibling, toggle, 'display toggle follows help in the header');
+    assert.equal(h.wrap.querySelector('.board-display-controls').hidden, true);
     toggle.click();
     assert.equal(panel.hidden, false);
     assert.equal(toggle.getAttribute('aria-expanded'), 'true');
@@ -182,7 +186,7 @@ test('collapsed controls return measured space without losing the divider or boa
   controls.offsetHeight = 28;
   const collapsedRoom = h.view.available().height;
   h.get('boardDisplayToggle').click(); controls.offsetHeight = 100;
-  assert.equal(h.view.available().height, collapsedRoom - 72);
+  assert.equal(h.view.available().height, collapsedRoom - 100);
   h.view.setBoardPixels(500);
   h.get('boardDisplayToggle').click(); controls.offsetHeight = 28;
   assert.equal(h.view.boardPixels, 500);
@@ -622,6 +626,7 @@ test('rotation and viewport shrink clamp displayed layout but retain the preferr
 test('the board follows actual resized pane dimensions instead of an old portrait screen ratio', () => {
   for (const [width, height] of [[393, 852], [1200, 800]]) {
     const h = boardHarness({ width, height });
+    h.get('boardDisplayToggle').click();
     h.view.setPanePixels(300);
     h.wrap.clientWidth = 251; h.wrap.clientHeight = 229;
     const room = h.view.available({ portraitRatio: 0.9 });
@@ -636,6 +641,15 @@ test('the board follows actual resized pane dimensions instead of an old portrai
     assert.equal(h.view.boardPixels, null);
     assert.equal(h.view.widthFor(Math.min(more.width, more.height)), Math.min(more.width, more.height));
   }
+});
+
+test('divider is a one-pixel line with a wider invisible touch target in both orientations', () => {
+  const css = fs.readFileSync(path.join(web, 'app.css'), 'utf8');
+  assert.match(css, /\.board-pane-handle \{ width: 100%; height: 1px;/);
+  assert.match(css, /\.board-pane-handle \{ width: 1px; height: 100%;/);
+  assert.match(css, /\.board-pane-divider::before \{ content: ''; position: absolute; inset: -8px 0;/);
+  assert.match(css, /\.board-pane-divider::before \{ inset: 0 -8px;/);
+  assert.doesNotMatch(css, /\.board-pane-divider[^\n]*outline: 2px/);
 });
 
 test('reset layout clears both pane orientations and fixed board width but retains text size and match state', () => {
