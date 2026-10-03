@@ -142,6 +142,7 @@ function load() {
 // ---------------- 棋盘绘制 ----------------
 
 const canvas = $('board'), ctx = canvas.getContext('2d');
+const boardSizing = window.BoardView?.mount(canvas, { key: `cc-${GAME}`, onChange: () => layout() });
 const geom = { cell: 40, ox: 0, oy: 0, w: 0, h: 0 };
 const isDark = () => document.documentElement.dataset.theme === 'dark';
 
@@ -150,9 +151,11 @@ function layout() {
   const landscape = innerWidth >= innerHeight;
   const cols = IS_CHESS ? 8 : 9.8, rows = IS_CHESS ? 8 : 10.8;
   let maxW, maxH;
-  if (landscape) { maxW = wrap.clientWidth - 12; maxH = wrap.clientHeight - 12; } else { maxW = innerWidth - 12; maxH = innerHeight * 0.64; }
-  const cell = Math.max(24, Math.floor(Math.min(maxW / cols, maxH / rows)));
-  const w = Math.round(cell * cols), h = Math.round(cell * rows);
+  if (boardSizing) { const bounds = boardSizing.available({ portraitRatio: 0.64 }); maxW = bounds.width; maxH = bounds.height; }
+  else if (landscape) { maxW = wrap.clientWidth - 12; maxH = wrap.clientHeight - 12; } else { maxW = innerWidth - 12; maxH = innerHeight * 0.64; }
+  const baseCell = Math.min(maxW / cols, maxH / rows);
+  const cell = Math.max(0.1, boardSizing ? boardSizing.widthFor(baseCell * cols) / cols : Math.max(24, Math.floor(baseCell)));
+  const w = Math.max(1, Math.floor(cell * cols)), h = Math.max(1, Math.floor(cell * rows));
   const dpr = window.devicePixelRatio || 1;
   canvas.style.width = w + 'px'; canvas.style.height = h + 'px';
   canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr);
@@ -160,6 +163,7 @@ function layout() {
   geom.cell = cell; geom.w = w; geom.h = h;
   geom.ox = IS_CHESS ? 0 : cell * 0.9; geom.oy = IS_CHESS ? 0 : cell * 0.9;
   draw();
+  boardSizing?.resized(w, h);
 }
 
 /** 棋盘格 (x,y) → 画面坐标中心 */
@@ -370,7 +374,8 @@ function draw() {
 // ---------------- 点棋盘走子 ----------------
 
 let promoWait = null;
-canvas.addEventListener('pointerdown', async e => {
+canvas.addEventListener('pointerup', async e => {
+  if (boardSizing && !boardSizing.isTap(e)) return;
   const rect = canvas.getBoundingClientRect();
   const c = cellAt(e.clientX - rect.left, e.clientY - rect.top);
   if (!c) return;
@@ -382,7 +387,9 @@ canvas.addEventListener('pointerdown', async e => {
     if (cands.length) {
       let m = cands[0];
       if (cands.length > 1) {
+        const g = gen, mode = S.mode;
         const ch = await askPromo();
+        if (!ch || g !== gen || mode !== S.mode || (mode === 'play' && S.play.result)) return;
         m = cands.find(x => ' pnbrqk'[R.mPromo(x)] === ch) || cands[0];
       }
       sel = -1;
@@ -404,6 +411,18 @@ function askPromo() {
 }
 $('dlgPromo').addEventListener('close', () => { if (promoWait) { promoWait($('dlgPromo').returnValue || 'q'); promoWait = null; } });
 
+function cancelPlayDialogs() {
+  // A pending promotion must resolve without moving in a new or ended game.
+  const resolve = promoWait;
+  promoWait = null;
+  if (resolve) resolve(null);
+  const promo = $('dlgPromo');
+  if (promo.open) promo.close();
+  const confirm = $('dlgConfirm');
+  confirm.onclose = null;
+  if (confirm.open) confirm.close();
+}
+
 function userMove(u) {
   hint = null;
   if (S.mode === 'play') playUserMove(u);
@@ -421,6 +440,7 @@ const sideLabel = c => (pvp() ? SIDES[c] : c === S.play.human ? '你' : 'AI');
 
 function newGame(opts) {
   growthAbandon();
+  cancelPlayDialogs();
   eng.cancel();
   gen++;
   aiBusy = false;
@@ -433,11 +453,12 @@ function newGame(opts) {
 }
 
 function getAnalysis(k) {
+  if (S.mode !== 'play' || S.play.result) return Promise.resolve(null);
   if (A[k]) return Promise.resolve(A[k]);
   if (!Aprom[k]) {
     const g = gen;
     Aprom[k] = eng.run(S.play.fen, S.play.moves.slice(0, k), { ms: ANALYZE_MS }).then(r => {
-      if (!r || g !== gen) return null;
+      if (!r || g !== gen || S.mode !== 'play' || S.play.result) return null;
       A[k] = r;
       if (k >= 1) makeComment(k - 1);
       render();
@@ -450,7 +471,7 @@ function getAnalysis(k) {
 async function advance() {
   const g = gen;
   for (;;) {
-    if (g !== gen || S.mode !== 'play') return;
+    if (g !== gen || S.mode !== 'play' || S.play.result) return;
     const p = playPos(), k = S.play.moves.length;
     const res = R.result(p);
     if (res) { finishGame(res); return; }
@@ -462,13 +483,14 @@ async function advance() {
 }
 
 async function aiMove(g) {
+  if (g !== gen || S.mode !== 'play' || S.play.result) return;
   aiBusy = true;
   render();
   const t0 = Date.now();
   const lv = LEVELS[S.prefs.level] || LEVELS[1];
   const k = S.play.moves.length;
   const r = await eng.run(S.play.fen, S.play.moves, { ms: lv.ms, all: lv.temp > 0 });
-  if (!r || g !== gen) return;
+  if (!r || g !== gen || S.mode !== 'play' || S.play.result) return;
   // 大势已去就认输：被杀在即，或者落后一个车以上且下了 30 手以上
   if (r.depth >= 4 && (mateIn(r.score) < 0 && mateIn(r.score) >= -4 || (r.score < -900 && S.play.moves.length >= 30))) {
     aiBusy = false;
@@ -486,7 +508,7 @@ async function aiMove(g) {
   if (!A[k] && r.depth >= 3 && lv.temp === 0) A[k] = r;
   const wait = 400 - (Date.now() - t0);
   if (wait > 0) await sleep(wait);
-  if (g !== gen) return;
+  if (g !== gen || S.mode !== 'play' || S.play.result) return;
   aiBusy = false;
   S.play.moves.push(u);
   save();
@@ -541,6 +563,8 @@ function commentHtml(c) {
 
 function finishGame(res) {
   if (S.play.result) return;
+  cancelPlayDialogs();
+  eng.cancel(); gen++; aiBusy = false; Aprom = [];
   S.play.result = res;
   const text = res.winner < 0 ? `和棋：${res.reason}` : `${SIDES[res.winner]}胜（${res.reason}）`;
   S.records.unshift({ date: new Date().toISOString(), fen: S.play.fen, moves: S.play.moves.slice(), result: text, human: S.play.human, opp: S.play.opp, level: LEVELS[S.prefs.level].name });
@@ -557,6 +581,24 @@ function finishGame(res) {
   body += growthOnEnd(res, mistakes);
   body += '<p class="note">对局已保存到“棋谱 → 我的对局”，可以随时复盘。</p>';
   showMsg('对局结束', body);
+}
+
+function endCurrentGame() {
+  if (S.mode !== 'play' || S.play.result) return;
+  cancelPlayDialogs();
+  eng.cancel(); gen++; aiBusy = false;
+  Aprom = []; view = null; hint = null; sel = -1;
+  S.play.result = { text: '本局已结束（未计胜负）', winner: null, abandoned: true };
+  S.play.unrated = '主动结束';
+  S.play.done = true;
+  if (S.play.moves.length) {
+    S.records.unshift({ date: new Date().toISOString(), fen: S.play.fen, moves: S.play.moves.slice(), result: S.play.result.text, winner: null, abandoned: true, human: S.play.human, opp: S.play.opp, level: LEVELS[S.prefs.level].name });
+    S.records = S.records.slice(0, 50);
+  }
+  save();
+  fillGames();
+  render();
+  toast(S.play.moves.length ? '本局已结束，棋谱已保存，未计胜负' : '本局已结束，未计胜负');
 }
 
 function unrate(reason) {
@@ -585,6 +627,7 @@ function ccCategory(c) {
 }
 
 function growthOnEnd(res, mistakes) {
+  if (res.abandoned) return '';
   if (S.play.done || pvp()) return '';
   S.play.done = true;
   let out = '';
@@ -671,7 +714,8 @@ function growthAction(a) {
 }
 
 function undo() {
-  if (!S.play.moves.length) return;
+  if (!S.play.moves.length || S.play.result?.abandoned) return;
+  cancelPlayDialogs();
   unrate('用了悔棋');
   eng.cancel();
   gen++;
@@ -1043,7 +1087,7 @@ function render() {
   let status = '', coach = '', moves = '';
   if (mode === 'play') {
     const p = playPos(), k = S.play.moves.length;
-    if (S.play.result) status = S.play.result.winner < 0 ? `和棋：${S.play.result.reason}` : `${SIDES[S.play.result.winner]}胜：${S.play.result.reason}`;
+    if (S.play.result) status = S.play.result.abandoned ? S.play.result.text : S.play.result.winner < 0 ? `和棋：${S.play.result.reason}` : `${SIDES[S.play.result.winner]}胜：${S.play.result.reason}`;
     else if (aiBusy) status = `AI（${LEVELS[S.prefs.level].name}）思考中…`;
     else status = `轮到${pvp() ? SIDES[p.turn] : p.turn === S.play.human ? `你（执${SIDE_SHORT[S.play.human]}）` : 'AI'}走 · 第 ${Math.floor(k / 2) + 1} 回合${R.inCheck(p) ? ' · 被将军了！' : ''}`;
     const la = A[k] || A[k - 1] && { score: -A[k - 1].score, stale: true };
@@ -1053,9 +1097,10 @@ function render() {
       const sMe = turnAt === me ? A[lk].score : -A[lk].score, w = winProb(sMe);
       setWr(`${pvp() ? SIDE_SHORT[me] : '你'} ${pct(w)}`, w, `${pvp() ? SIDE_SHORT[1 - me] : 'AI'} ${pct(1 - w)}`);
     } else setWr('', null, '');
-    $('btnUndo').disabled = !S.play.moves.length;
+    $('btnUndo').disabled = !S.play.moves.length || !!S.play.result?.abandoned;
     $('btnHint').disabled = !canHumanMove();
     $('btnResign').disabled = !!S.play.result;
+    $('btnEnd').disabled = !!S.play.result;
     $('btnHint').classList.toggle('on', !!hint);
     const list = [];
     if (hint && HINT_HTML) list.push(HINT_HTML);
@@ -1111,6 +1156,7 @@ function render() {
 
 function setMode(m) {
   if (S.mode === m) return;
+  cancelPlayDialogs();
   eng.cancel();
   gen++;
   aiBusy = false;
@@ -1166,17 +1212,19 @@ dlgNew.addEventListener('close', () => {
   newGame({ opp: fNew.opp.value, human: +fNew.side.value });
 });
 $('btnUndo').addEventListener('click', undo);
+$('btnEnd').addEventListener('click', endCurrentGame);
 $('btnHint').addEventListener('click', () => { if (hint) { hint = null; render(); } else showHint(); });
 $('btnFlip').addEventListener('click', () => { S.flip = !S.flip; save(); draw(); });
 $('btnResign').addEventListener('click', () => {
-  if (S.play.result) return;
+  if (S.mode !== 'play' || S.play.result) return;
+  const g = gen, game = S.play;
   // 真人对战：轮到谁走谁认输；对 AI：你认输
   const loser = pvp() ? playPos().turn : S.play.human;
   $('confirmText').textContent = pvp() ? `确定${SIDES[loser]}认输吗？` : '确定要认输吗？';
   const d = $('dlgConfirm');
   d.returnValue = '';
   d.onclose = () => {
-    if (d.returnValue !== 'ok' || S.play.result) return;
+    if (d.returnValue !== 'ok' || g !== gen || S.play !== game || S.mode !== 'play' || S.play.result) return;
     eng.cancel(); gen++; aiBusy = false;
     finishGame({ winner: 1 - loser, reason: pvp() ? `${SIDES[loser]}认输` : '你认输了' });
   };

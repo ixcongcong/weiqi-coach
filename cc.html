@@ -2,7 +2,7 @@
 <html lang="zh-CN" data-game="xiangqi">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="弈">
@@ -50,6 +50,7 @@
       <button id="btnHint">提示</button>
       <button id="btnFlip">翻转</button>
       <button id="btnResign">认输</button>
+      <button id="btnEnd" title="立即结束当前局，保留棋谱，不计胜负">结束当前局</button>
       <label class="chip"><input type="checkbox" id="chkCoach">讲解</label>
       <label class="chip"><input type="checkbox" id="chkThreat">标出危险</label>
     </div>
@@ -158,6 +159,7 @@
 <script src="cc/xiangqi.js"></script>
 <script src="cc/data-chess.js"></script>
 <script src="cc/data-xiangqi.js"></script>
+<script src="board-view.js"></script>
 <script src="cc/app.js"></script>
 </body>
 </html>

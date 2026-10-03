@@ -2,7 +2,7 @@
 /* 围棋对战教练：对战、学习（课程与名局）、练习、提问。
  * 引擎在 engine.js；蒙特卡洛计算在 Web Worker 里进行，局部死活计算在主线程（很快）。 */
 
-const APP_VERSION = '3.8';
+const APP_VERSION = '3.11';
 const G = window.Go;
 const { EMPTY, BLACK, WHITE, PASS, NONE, RESIGN } = G;
 const GAMES = window.GAMES || [];
@@ -721,6 +721,7 @@ function warnAtari(mover) {
 }
 
 function playMove(m, internal) {
+  if (S.result || S.scoring || S.scoringBusy) return false;
   const mover = S.board.toPlay;
   if (!S.board.play(m)) return false;
   S.history.push(m);
@@ -742,6 +743,7 @@ function playMove(m, internal) {
 }
 
 async function startScoring() {
+  if (S.result || S.scoring || S.scoringBusy) return;
   S.scoringBusy = true;
   render();
   const gen = S.gen, pos = S.board.copy();
@@ -1039,7 +1041,7 @@ function humanWinner() {
 
 /** 对局结束：计分、把大失误放进错题本、统计弱点。返回要附加在结束提示里的文字。 */
 function growthOnEnd() {
-  if (S.game.growthDone || pvp() || captureRule()) return '';
+  if (S.result?.abandoned || S.game.growthDone || pvp() || captureRule()) return '';
   S.game.growthDone = true;
   let out = '';
   // 错题本：本局最大的 3 个失误
@@ -1231,7 +1233,7 @@ function unrate(reason) {
 }
 
 function undo() {
-  if (!S.history.length) return;
+  if (!S.history.length || S.result?.abandoned) return;
   unrate('用了悔棋');
   S.summary = null;
   cancelWork();
@@ -1255,13 +1257,36 @@ function humanPass() {
   playMove(PASS);
 }
 
+/** 中途结束：立即停止落子，保留棋谱，不评判输赢或改变等级分。 */
+function endCurrentGame() {
+  if (S.mode !== 'play' || S.result || S.scoring) return;
+  cancelWork();
+  S.ghost = NONE;
+  S.pendingTap = NONE;
+  S.hint = null;
+  Q.seq++;
+  Q.mark = null;
+  Q.area = null;
+  S.summary = null;
+  exitReview();
+  S.result = { text: '本局已结束（未计胜负）', winner: null, abandoned: true };
+  S.game.growthDone = true;
+  S.game.unrated = S.game.unrated || '中途结束';
+  recordGame();
+  save();
+  render();
+  toast(S.history.length ? '本局已结束，棋谱已保留，可回看或新开一局。' : '本局已结束，可以新开一局。');
+}
+
 function resign() {
   if (S.result || S.scoring) return;
+  const gen = S.gen;
   const loser = pvp() ? S.board.toPlay : S.game.human;
   showMessage('认输', pvp() ? `确定${colorName(loser)}方认输吗？` : '确定要认输吗？', false, [
     { label: '取消' },
     {
       label: '认输', primary: true, fn: () => {
+        if (gen !== S.gen || S.result || S.scoring) return;
         cancelWork();
         S.result = { text: pvp() ? `${colorName(loser)}方认输，${colorName(3 - loser)}方获胜` : '你认输了，AI 获胜', winner: 3 - loser };
         recordGame();
@@ -1298,8 +1323,9 @@ function recordGame() {
     id: g.recId, date: new Date().toISOString(), size: g.size, human: g.human, rule: g.rule, captureN: g.captureN,
     handicap: g.handicap, komi: g.komi, level: pvp ? '真人' : LEVELS[S.prefs.level].name, target: S.prefs.target, opp: pvp ? 'human' : 'ai',
     ab: S.setup.map(sg2).join(''), moves: S.history.map(sg2).join(''), moveCount: S.history.length,
-    result, won: pvp ? null : S.result ? S.result.winner === g.human : S.scoring ? S.scoring.winner() === g.human : null,
-    winner: S.result ? S.result.winner : S.scoring ? S.scoring.winner() : 0,
+    result, won: pvp || S.result?.abandoned ? null : S.result ? S.result.winner === g.human : S.scoring ? S.scoring.winner() === g.human : null,
+    winner: S.result?.abandoned ? 0 : S.result ? S.result.winner : S.scoring ? S.scoring.winner() : 0,
+    abandoned: Boolean(S.result?.abandoned),
     caps: [b.capB, b.capW],
   };
   const i = RECORDS.findIndex(r => r.id === rec.id);
@@ -1316,8 +1342,8 @@ function recordToGame(r) {
   return {
     kind: 'mine', id: r.id, group: '我的对局（保存在本机）',
     title: r.opp === 'human'
-      ? `${when} · ${r.size}路${r.rule === 'capture' ? ` 吃子棋（${r.captureN} 子）` : ''} · 真人对战 · ${r.winner === BLACK ? '黑胜' : r.winner === WHITE ? '白胜' : ''}`
-      : `${when} · ${r.size}路${r.rule === 'capture' ? ` 吃子棋（${r.captureN} 子）` : ''} · 你执${you} · ${r.won === true ? '赢' : '输'}`,
+      ? `${when} · ${r.size}路${r.rule === 'capture' ? ` 吃子棋（${r.captureN} 子）` : ''} · 真人对战 · ${r.abandoned ? '未计胜负' : r.winner === BLACK ? '黑胜' : r.winner === WHITE ? '白胜' : ''}`
+      : `${when} · ${r.size}路${r.rule === 'capture' ? ` 吃子棋（${r.captureN} 子）` : ''} · 你执${you} · ${r.abandoned || r.won == null ? '未计胜负' : r.won === true ? '赢' : '输'}`,
     size: r.size, komi: r.komi,
     black: r.opp === 'human' ? '黑方' : r.human === BLACK ? '你' : `AI（${r.level}）`, white: r.opp === 'human' ? '白方' : r.human === WHITE ? '你' : `AI（${r.level}）`,
     year: d.getFullYear(), result: r.result || '未下完', notes: {},
@@ -2006,21 +2032,25 @@ function setMode(m) {
 // ---------------- 棋盘绘制 ----------------
 
 const canvas = $('board'), ctx = canvas.getContext('2d');
+const boardSizing = window.BoardView?.mount(canvas, { key: 'go', onChange: () => layout() });
 const geom = { cell: 0, org: 0, px: 0, n: 9 };
 
 function layout() {
   const wrap = $('boardWrap');
   const landscape = innerWidth >= innerHeight;
   let size;
-  if (landscape) size = Math.min(wrap.clientWidth, wrap.clientHeight) - 12;
+  const room = boardSizing?.available({ portraitRatio: 0.62 });
+  if (room) size = Math.min(room.width, room.height);
+  else if (landscape) size = Math.min(wrap.clientWidth, wrap.clientHeight) - 12;
   else size = Math.min(innerWidth - 12, innerHeight * 0.62);
-  size = Math.max(200, Math.floor(size));
+  size = Math.max(1, Math.floor(boardSizing ? boardSizing.widthFor(size) : Math.max(200, size)));
   const dpr = window.devicePixelRatio || 1;
   canvas.style.width = canvas.style.height = size + 'px';
   canvas.width = canvas.height = Math.round(size * dpr);
   geom.px = size;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   drawBoard();
+  boardSizing?.resized(size, size);
 }
 
 function latestAnalysis(list, k) {
@@ -2345,6 +2375,7 @@ canvas.addEventListener('pointermove', e => {
 canvas.addEventListener('pointerup', e => {
   const p = toPoint(e);
   S.ghost = NONE;
+  if (boardSizing && !boardSizing.isTap(e)) { drawBoard(); return; }
   onBoardTap(p);
   drawBoard();
 });
@@ -2612,12 +2643,13 @@ function render() {
     }
     $('status').textContent = statusText();
     const my = canHumanMove();
-    $('btnUndo').disabled = !S.history.length;
+    $('btnUndo').disabled = !S.history.length || Boolean(S.result?.abandoned);
     $('btnPass').disabled = !my;
     $('btnHint').disabled = !my;
     $('btnOwn').disabled = captureRule();
     $('btnReview').disabled = !S.history.length;
     $('btnResign').disabled = !!(S.result || S.scoring);
+    $('btnEnd').disabled = !!(S.result || S.scoring);
     $('btnOwn').classList.toggle('on', S.prefs.own);
     $('chkCoach').checked = S.prefs.coach;
     $('chkCands').checked = S.prefs.cands;
@@ -3035,6 +3067,7 @@ $('btnHint').addEventListener('click', () => {
   showHint();
 });
 $('btnResign').addEventListener('click', resign);
+$('btnEnd').addEventListener('click', endCurrentGame);
 $('btnOwn').addEventListener('click', () => { S.prefs.own = !S.prefs.own; save(); render(); });
 $('btnReview').addEventListener('click', () => enterReview());
 $('btnRvPrev').addEventListener('click', () => reviewStep(-1));
