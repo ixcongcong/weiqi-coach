@@ -48,8 +48,25 @@
     const resetPanes = button('boardLayoutReset', '默认布局', '恢复默认棋盘和讲解区域大小');
     const text = button('boardTextZoom', '', '放大讲解文字');
     text.title = '讲解文字大小：100%、125%、150%循环切换';
-    for (const el of [label, less, range, pixelInput, more, value, reset, text, resetPanes]) controls.appendChild(el);
+    const toggle = button('boardDisplayToggle', '', '展开显示调节');
+    const panel = create('div', 'boardDisplayPanel'); panel.className = 'board-display-panel';
+    toggle.setAttribute('aria-controls', panel.id);
+    let controlsExpanded = false;
+    try { controlsExpanded = root.localStorage.getItem(`${storageKey}:controls`) === 'expanded'; } catch (e) { /* 默认收起。 */ }
+    function updateControls() {
+      panel.hidden = !controlsExpanded;
+      toggle.textContent = controlsExpanded ? '收起调节 ▴' : '显示调节 ▾';
+      toggle.setAttribute('aria-expanded', String(controlsExpanded));
+      toggle.setAttribute('aria-label', controlsExpanded ? '收起棋盘和文字显示调节' : '展开棋盘和文字显示调节');
+    }
+    for (const el of [label, less, range, pixelInput, more, value, reset, text, resetPanes]) panel.appendChild(el);
+    controls.appendChild(toggle); controls.appendChild(panel); updateControls();
     wrap.appendChild(controls);
+    toggle.addEventListener('click', () => {
+      controlsExpanded = !controlsExpanded; updateControls();
+      try { root.localStorage.setItem(`${storageKey}:controls`, controlsExpanded ? 'expanded' : 'collapsed'); } catch (e) { /* 棋局不受影响。 */ }
+      applyPane(); onChange();
+    });
     const app = document.getElementById('app'), side = document.getElementById('side'), top = document.getElementById('top');
     const direction = () => root.innerWidth >= root.innerHeight ? 'landscape' : 'portrait';
     let actualWidth = 0, overflowing = percent > 100;

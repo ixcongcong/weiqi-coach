@@ -157,6 +157,39 @@ function boardHarness({ key = 'go', width = 393, height = 852, stored = new Map(
     changed: () => changed, get: id => elements.get(id) };
 }
 
+test('display controls default collapsed, toggle accessibly and remember state for each game', () => {
+  for (const key of ['go', 'cc-chess', 'cc-xiangqi']) {
+    const stored = new Map(), h = boardHarness({ key, stored });
+    const panel = h.get('boardDisplayPanel'), toggle = h.get('boardDisplayToggle');
+    assert.equal(panel.hidden, true);
+    assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+    assert.equal(toggle.getAttribute('aria-controls'), panel.id);
+    toggle.click();
+    assert.equal(panel.hidden, false);
+    assert.equal(toggle.getAttribute('aria-expanded'), 'true');
+    assert.ok(h.changed() > 0);
+    assert.equal(boardHarness({ key, stored }).get('boardDisplayPanel').hidden, false);
+    toggle.click();
+    assert.equal(boardHarness({ key, stored }).get('boardDisplayPanel').hidden, true);
+    assert.equal(h.view.boardPixels, null);
+    assert.equal(boardHarness({ key, rejectStorage: true }).get('boardDisplayPanel').hidden, true);
+  }
+});
+
+test('collapsed controls return measured space without losing the divider or board settings', () => {
+  const h = boardHarness();
+  const controls = h.wrap.querySelector('.board-display-controls');
+  controls.offsetHeight = 28;
+  const collapsedRoom = h.view.available().height;
+  h.get('boardDisplayToggle').click(); controls.offsetHeight = 100;
+  assert.equal(h.view.available().height, collapsedRoom - 72);
+  h.view.setBoardPixels(500);
+  h.get('boardDisplayToggle').click(); controls.offsetHeight = 28;
+  assert.equal(h.view.boardPixels, 500);
+  assert.equal(h.view.available().height, collapsedRoom);
+  assert.ok(h.get('boardPaneDivider'));
+});
+
 test('board size controls use freely adjustable pixels, apply slider/buttons/input and reset to fit', () => {
   const h = boardHarness(), slider = h.get('boardZoom');
   h.view.resized(350, 350);
