@@ -149,6 +149,9 @@ html.board-layout-page, html.board-layout-page body { height: 100%; overflow: hi
 .board-display-controls input[type=number] { width: 68px; min-width: 0; padding: 4px; border: 1px solid var(--line); border-radius: 6px; background: var(--field); color: var(--ink); font: inherit; }
 .board-display-controls output { min-width: 3.2em; font-variant-numeric: tabular-nums; text-align: center; }
 .board-display-controls button { min-height: 34px; }
+.board-display-panel { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 6px; width: 100%; }
+.board-display-panel[hidden] { display: none; }
+#boardDisplayToggle { min-height: 28px; padding: 3px 10px; font-size: 12px; }
 @media (max-width: 600px) { .board-display-controls input[type=range] { display: none; } }
 #board {
   display: block;
