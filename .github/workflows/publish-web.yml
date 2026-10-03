@@ -1,0 +1,42 @@
+name: Verify and publish website
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'web/**'
+      - 'tools/test_*.js'
+      - 'tools/publish_web.mjs'
+      - '.github/workflows/publish-web.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+
+concurrency:
+  group: weiqi-coach-pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - name: Check JavaScript syntax
+        run: |
+          node --check web/app.js
+          node --check web/cc/app.js
+          node --check web/board-view.js
+          node --check web/sw.js
+          node --check tools/publish_web.mjs
+          git diff --check
+      - name: Run regression checks
+        run: node --test tools/test_end_game.js tools/test_cc_end_game.js tools/test_board_view.js
+      - name: Publish verified web files to existing Pages branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node tools/publish_web.mjs
