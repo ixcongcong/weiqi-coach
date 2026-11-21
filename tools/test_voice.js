@@ -110,3 +110,52 @@ test('关掉时立刻停声，之后不再念', () => {
   assert.equal(Voice.say('白棋，第 4 列，第 4 行'), false);
   assert.equal(spoken.length, 1);
 });
+
+// 截图里那种点评：总评 + 几条原因 + 更好的点
+function sampleComment() {
+  return {
+    j: 0, who: '你', name: 'D7', q: { label: '缓手' }, pts: 5, wrBefore: 0.36, wrAfter: 0.27,
+    reasons: [
+      '占角（小目）：金角银边草肚皮——角上用最少的棋子就能围到地，布局要先占空角。',
+      '这手棋让形势亏了约 5 目。',
+      '这手之后更可能变成你地盘的点：B9、C9、D9、D7（共 4 个，点“在棋盘上看”）。',
+      '这手之后，你落后约 1.5 目（按数子、含贴目）。',
+    ],
+    best: { name: 'E6', wr: 0.36, reasons: ['占据中央：9 路棋盘很小，中央的棋子能同时照顾四个角。'] },
+  };
+}
+
+test('讲解「全部」：点评、原因、更好的点都念出来', () => {
+  const { Voice } = loadVoice();
+  Voice.set('on', true);
+  const text = Voice.commentText(sampleComment(), '第 4 列，第 3 行', '第 5 列，第 4 行', 'full');
+  assert.match(text, /^第 1 手，你下 第 4 列，第 3 行，缓手。/, '先说第几手、谁下的、下在哪');
+  assert.match(text, /金角银边草肚皮/, '念出原因');
+  assert.match(text, /B9、C9、D9、D7/, '念出可能成地盘的点');
+  assert.doesNotMatch(text, /在棋盘上看/, '去掉只给屏幕看的提示');
+  assert.match(text, /更好的点是 第 5 列，第 4 行/, '念出更好的点');
+  assert.match(text, /占据中央/, '念出更好的点的原因');
+  assert.equal((text.match(/亏了约 5 目/g) || []).length, 1, '同一句亏损不重复念');
+});
+
+test('讲解「简短」：只念总评、亏几目和更好的点', () => {
+  const { Voice } = loadVoice();
+  Voice.set('on', true);
+  const text = Voice.commentText(sampleComment(), '第 4 列，第 3 行', '第 5 列，第 4 行', 'brief');
+  assert.match(text, /第 1 手，你下 第 4 列，第 3 行，缓手/);
+  assert.match(text, /亏了约 5 目/);
+  assert.match(text, /更好的点是 第 5 列，第 4 行/);
+  assert.doesNotMatch(text, /金角银边草肚皮/, '简短模式不念长原因');
+  assert.ok(text.length < 60, '简短模式要短');
+});
+
+test('讲解会排队念出来；关掉讲解就不念', () => {
+  const { Voice, spoken } = loadVoice();
+  Voice.set('on', true);
+  Voice.comment(sampleComment(), '第 4 列，第 3 行', '第 5 列，第 4 行');
+  assert.match(spoken[0] || '', /第 1 手，你下 第 4 列，第 3 行，缓手/, '接在落子后面念');
+  Voice.set('comment', 'off');
+  const before = spoken.length;
+  assert.equal(Voice.comment(sampleComment(), 'D7', ''), '');
+  assert.equal(spoken.length, before, '关掉之后不再念');
+});

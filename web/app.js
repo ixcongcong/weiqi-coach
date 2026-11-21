@@ -2,7 +2,7 @@
 /* 围棋对战教练：对战、学习（课程与名局）、练习、提问。
  * 引擎在 engine.js；蒙特卡洛计算在 Web Worker 里进行，局部死活计算在主线程（很快）。 */
 
-const APP_VERSION = '3.14';
+const APP_VERSION = '3.15';
 const G = window.Go;
 const { EMPTY, BLACK, WHITE, PASS, NONE, RESIGN } = G;
 const GAMES = window.GAMES || [];
@@ -735,6 +735,23 @@ function announceMove(mover, m, caps, byAI) {
   if (byAI && V.settings.turn && !S.result && isHumanTurn()) V.turn('轮到你了');
 }
 
+/** 把这一手的点评念出来。等一下再念，是为了让“更好的点”的原因也解析完，免得同一手念两遍。 */
+function speakComment(j) {
+  const V = window.Voice;
+  if (!V || !V.on || V.settings.comment === 'off' || S.mode !== 'play') return;
+  setTimeout(() => {
+    if (j !== S.history.length - 1 || S.mode !== 'play' || !V.on || V.settings.comment === 'off') return;
+    const cm = S.comments[j];
+    if (!cm) return;
+    const board = boardAt(j);
+    const p = nameToPt(board, cm.name);
+    const at = p >= 0 ? V.coord(board, p) : cm.name;
+    const bp = cm.best ? nameToPt(board, cm.best.name) : -1;
+    const bestAt = cm.best ? (bp >= 0 ? V.coord(board, bp) : cm.best.name) : '';
+    V.comment(cm, at, bestAt);
+  }, 1200);
+}
+
 /** 终局播报一句：对局结束，谁赢。 */
 function announceResult() {
   const V = window.Voice;
@@ -837,6 +854,7 @@ async function makeComment(j) {
   S.comments[j] = cm;
   save();
   render();
+  speakComment(j);
   if (cm.best) {
     const gen = S.gen, after = pre.copy();
     after.play(top.move);

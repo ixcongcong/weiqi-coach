@@ -10,6 +10,7 @@
     rate: 1,          // 语速
     turn: true,       // AI 下完提醒“轮到你了”
     wake: true,       // 开着语音时让屏幕常亮
+    comment: 'full',  // off：不念讲解；full：点评、原因、更好的点都念；brief：总评 + 亏几目 + 更好的点
   };
 
   let s = load();
@@ -32,6 +33,51 @@
   function coord(b, p) {
     if (s.style === 'letters') return b.name(p);
     return '第 ' + (b.x(p) + 1) + ' 列，第 ' + (b.n - b.y(p)) + ' 行';
+  }
+
+  // ---------------- 讲解（点评）念出来 ----------------
+  /** 去掉只给屏幕看的提示（“点‘在棋盘上看’”之类）。 */
+  function forSpeech(text) {
+    return String(text || '')
+      .replace(/（[^）]*在棋盘上看[^）]*）/g, '')
+      .replace(/点[“"]在棋盘上看[”"]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .replace(/[。！；]+$/, '');
+  }
+
+  /** 点评 → 播报稿。mode：brief 只要总评和更好的点；full 把原因都念出来。 */
+  function commentText(cm, at, bestAt, mode) {
+    if (!cm) return '';
+    const full = mode === 'full';
+    const out = [];
+    const label = cm.q && cm.q.label ? '，' + cm.q.label : '';
+    out.push('第 ' + ((cm.j | 0) + 1) + ' 手，' + (cm.who || '') + '下 ' + (at || cm.name || '') + label);
+    const seen = new Set();
+    const push = text => {
+      const clean = forSpeech(text);
+      const key = clean.replace(/[，。、；：\s]/g, '');
+      if (!clean || seen.has(key)) return;
+      seen.add(key);
+      out.push(clean);
+    };
+    const reasons = (cm.reasons || []).slice();
+    if (cm.simple) {
+      reasons.forEach(push);
+      return out.join('。') + '。';
+    }
+    if (cm.pts !== null && cm.pts !== undefined && cm.pts >= 1) push('这手棋让形势亏了约 ' + Math.round(cm.pts * 2) / 2 + ' 目');
+    if (full) {
+      reasons.forEach(push);
+    } else if (!out.length || out.length === 1) {
+      push(reasons[0]);
+    }
+    if (cm.best && (bestAt || cm.best.name)) {
+      const better = '更好的点是 ' + (bestAt || cm.best.name);
+      push(better);
+      if (full && Array.isArray(cm.best.reasons)) cm.best.reasons.forEach(push);
+    }
+    return out.join('。') + '。';
   }
 
   // ---------------- 语音合成 ----------------
@@ -119,6 +165,14 @@
       say(text, opt);
       return text;
     },
+    /** 把一条点评念出来：cm 是点评对象，at 是这手的念法，bestAt 是“更好的点”的念法。 */
+    comment(cm, at, bestAt) {
+      if (!s.on || s.comment === 'off' || !cm) return '';
+      const text = commentText(cm, at, bestAt, s.comment);
+      if (text) say(text, { interrupt: false });
+      return text;
+    },
+    commentText,
     /** AI 下完提醒轮到你了（不打断上一句）。 */
     turn(text) { if (s.on) say(text || '轮到你了', { interrupt: false }); },
     /** 终局。 */
@@ -168,6 +222,7 @@
     if (!dlg) return;
     const st = $('voiceStyle'), sc = $('voiceScope'), rt = $('voiceRate'), rtText = $('voiceRateText');
     const tn = $('voiceTurn'), wk = $('voiceWake'), status = $('voiceStatus');
+    const cmSel = $('voiceComment');
 
     if (cfg) cfg.addEventListener('click', () => {
       st.value = s.style;
@@ -176,6 +231,7 @@
       rtText.textContent = (+s.rate).toFixed(1) + ' 倍';
       tn.checked = !!s.turn;
       wk.checked = !!s.wake;
+      if (cmSel) cmSel.value = s.comment;
       status.textContent = synth ? '' : '这个浏览器不支持语音合成，换用 Chrome 或 Safari 试试。';
       dlg.showModal();
     });
@@ -186,6 +242,7 @@
       api.set('rate', +rt.value);
     });
     tn.addEventListener('change', () => api.set('turn', tn.checked));
+    if (cmSel) cmSel.addEventListener('change', () => api.set('comment', cmSel.value));
     wk.addEventListener('change', () => api.set('wake', wk.checked));
     $('btnVoiceTest').addEventListener('click', () => api.test());
 
