@@ -2,7 +2,7 @@
 /* 围棋对战教练：对战、学习（课程与名局）、练习、提问。
  * 引擎在 engine.js；蒙特卡洛计算在 Web Worker 里进行，局部死活计算在主线程（很快）。 */
 
-const APP_VERSION = '3.13';
+const APP_VERSION = '3.14';
 const G = window.Go;
 const { EMPTY, BLACK, WHITE, PASS, NONE, RESIGN } = G;
 const GAMES = window.GAMES || [];
@@ -720,10 +720,37 @@ function warnAtari(mover) {
   if (at.length) toast(`注意：${pvp() ? colorName(who) + '方' : '你'}的 ${at.reduce((n, g) => n + g.stones.length, 0)} 个子被叫吃了（红圈）`);
 }
 
+/** 语音播报这一手：谁下的、下在哪、吃了几颗。只在对战模式念，回看和试下不念。 */
+function announceMove(mover, m, caps, byAI) {
+  const V = window.Voice;
+  if (!V || !V.on || S.mode !== 'play' || S.view !== null) return;
+  const all = V.settings.scope !== 'ai';
+  const who = pvp() ? colorName(mover) + '方' : colorName(mover) + '棋';
+  if (m === PASS) {
+    if (byAI || all) V.say(who + '停一手');
+  } else if (byAI || all) {
+    V.move(who, S.board, m, caps);
+  }
+  // AI 下完，轮到你了：听着就能接着摆
+  if (byAI && V.settings.turn && !S.result && isHumanTurn()) V.turn('轮到你了');
+}
+
+/** 终局播报一句：对局结束，谁赢。 */
+function announceResult() {
+  const V = window.Voice;
+  if (!V || !V.on) return;
+  let text = '对局结束';
+  const w = S.result ? S.result.winner : S.scoring ? S.scoring.winner() : null;
+  if (w === BLACK || w === WHITE) text += pvp() ? '，' + colorName(w) + '方胜' : w === S.game.human ? '，你赢了' : '，AI 赢了';
+  V.result(text);
+}
+
 function playMove(m, internal) {
   if (S.result || S.scoring || S.scoringBusy) return false;
   const mover = S.board.toPlay;
+  const caps0 = S.board.capB + S.board.capW;
   if (!S.board.play(m)) return false;
+  const caps = S.board.capB + S.board.capW - caps0;
   S.history.push(m);
   S.hint = null;
   Q.mark = null;
@@ -738,6 +765,7 @@ function playMove(m, internal) {
     else warnAtari(mover);
   }
   render();
+  announceMove(mover, m, caps, !!internal);
   if (!internal) advance();
   return true;
 }
@@ -1030,6 +1058,7 @@ function finishGame(text, title) {
   S.summary = buildSummary();
   render();
   showMessage(title || '对局结束', `${text}\n\n下方的“本局总结”里有详细的${pvp() ? '胜负' : '输赢'}原因。`, true);
+  announceResult();
 }
 
 // ---------------- 成长：计分、错题、弱点 ----------------

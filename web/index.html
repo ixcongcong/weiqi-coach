@@ -60,6 +60,8 @@
       <label class="chip"><input type="checkbox" id="chkMarks">标出得失</label>
       <label class="chip"><input type="checkbox" id="chkCands">推荐点</label>
       <label class="chip"><input type="checkbox" id="chkConfirm">确认落子</label>
+      <label class="chip"><input type="checkbox" id="chkVoice">语音</label>
+      <button id="btnVoiceCfg" class="small" hidden>语音设置</button>
     </div>
 
     <!-- 回看（不改变对局） -->
@@ -227,6 +229,7 @@
         <li><b>悔棋</b>：真正退回到你的上一手，重新下。</li>
         <li><b>停一手</b>：双方都没有好地方下时才停。双方连续停一手就终局数子，数子时点棋子可以切换死活。</li>
         <li><b>新局</b>：选择玩法（正式对局 / 吃子棋）、棋盘、执黑执白、让子、贴目、AI 难度，以及“AI 胜率控制”——调低后 AI 会故意放水。只想改难度，就点“只改 AI 设置”。</li>
+        <li><b>语音播报</b>：勾选“语音”，每一手棋都会念出来（“白棋，第 5 列，第 3 行”），吃子会多念一句。手机放在棋盘旁边、眼睛看着真实棋盘就能下，睡前也不伤眼。点“语音设置”可以改念法（也可以念成 D4 那样的坐标）、语速，以及只念 AI 的手、让屏幕常亮。语音是本机自带的语音合成，不联网。</li>
       </ul>
       <h3>学习</h3>
       <ul>
@@ -295,6 +298,34 @@
   </form>
 </dialog>
 
+<dialog id="dlgVoice">
+  <form method="dialog">
+    <h2>语音播报</h2>
+    <p class="note">开着的时候，每一手棋都会念出来——例如“白棋，第 5 列，第 3 行”。手机放在棋盘旁边，眼睛看着真实棋盘就能下，不用一直盯着屏幕。</p>
+    <label class="row">念法
+      <select id="voiceStyle">
+        <option value="zh">第 5 列，第 3 行（从左数、从下数，真棋盘上最好数）</option>
+        <option value="letters">D4（和屏幕上的坐标一样）</option>
+      </select>
+    </label>
+    <label class="row">念谁的手
+      <select id="voiceScope">
+        <option value="all">双方都念</option>
+        <option value="ai">只念 AI 的（你下完不看屏幕也能接着下）</option>
+      </select>
+    </label>
+    <label class="row">语速 <input id="voiceRate" type="range" min="0.6" max="1.6" step="0.1"><b id="voiceRateText"></b></label>
+    <label class="chip"><input type="checkbox" id="voiceTurn">AI 下完提醒“轮到你了”</label>
+    <label class="chip"><input type="checkbox" id="voiceWake">播报时屏幕常亮</label>
+    <p class="note" id="voiceStatus"></p>
+    <p class="note">吃子的那一手会多念一句“吃掉 N 子”。语音由设备自带的语音合成完成，不联网、不上传任何内容。</p>
+    <menu>
+      <button type="button" id="btnVoiceTest">试听</button>
+      <button value="close" class="primary">完成</button>
+    </menu>
+  </form>
+</dialog>
+
 <dialog id="dlgAI">
   <form method="dialog">
     <h2>AI 老师设置</h2>
@@ -344,6 +375,7 @@
 <script src="problems.js"></script>
 <script src="faq.js"></script>
 <script src="board-view.js"></script>
+<script src="voice.js"></script>
 <script src="app.js"></script>
 <script src="assistant.js"></script>
 </body>
