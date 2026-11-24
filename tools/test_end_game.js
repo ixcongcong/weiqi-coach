@@ -506,3 +506,25 @@ test('the top button hides the whole play panel and restores it for review and r
   assert.equal(side.hidden, false);
   assert.equal(toggle.hidden, true);
 });
+
+test('floating commentary preserves the current move when appearance changes and remembers preferences', () => {
+  const h = harness(), { S, playMove } = h.c;
+  S.game.opp = 'human';
+  S.game.rule = 'capture';
+  S.prefs.coach = S.prefs.boardCoach = true;
+  playMove(S.board.pt(0, 0));
+  const commentary = h.getElement('boardCoach');
+  const markup = commentary.innerHTML;
+  assert.match(markup, /<summary[^>]*><span>第 1 手/);
+  assert.match(markup, /board-coach-detail/);
+  for (const [id, value] of [['boardCoachPosition', 'bottom'], ['boardCoachFont', '24'], ['boardCoachBackground', 'light']]) {
+    const control = h.getElement(id);
+    control.value = value;
+    control.dispatch('change');
+  }
+  assert.equal(commentary.innerHTML, markup);
+  const reloaded = harness(h.storage);
+  reloaded.c.S.prefs.coach = true;
+  reloaded.c.render();
+  assert.deepEqual(reloaded.getElement('boardCoach').dataset, { position: 'bottom', font: '24', background: 'light' });
+});

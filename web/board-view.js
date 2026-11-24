@@ -8,7 +8,7 @@
   };
   const clampBoardPixels = value => value == null ? null : Number.isFinite(Number(value)) ? Math.max(96, Math.min(2400, Math.round(Number(value)))) : null;
   const validPane = value => typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.round(value) : null;
-  function mount(canvas, { key, header, toggleAfter, onChange = () => {} } = {}) {
+  function mount(canvas, { key, toggleAfter, extraControls, onChange = () => {} } = {}) {
     if (mounted.has(canvas)) return mounted.get(canvas);
     const wrap = canvas.parentElement, storageKey = `weiqi-board-view:${key || 'go'}`;
     let percent = 100, textPercent = 100, boardPixels = null;
@@ -61,6 +61,7 @@
       toggle.setAttribute('aria-label', controlsExpanded ? '收起棋盘和文字显示调节' : '展开棋盘和文字显示调节');
     }
     for (const el of [label, less, range, pixelInput, more, value, reset, text, resetPanes]) panel.appendChild(el);
+    if (extraControls) panel.appendChild(extraControls);
     const anchor = toggleAfter || document.getElementById('btnHelp');
     if (anchor?.parentElement) anchor.parentElement.insertBefore(toggle, anchor.nextSibling);
     else wrap.appendChild(toggle);
@@ -74,7 +75,6 @@
     const app = document.getElementById('app'), side = document.getElementById('side'), top = document.getElementById('top');
     const direction = () => root.innerWidth >= root.innerHeight ? 'landscape' : 'portrait';
     const controlsHeight = () => controls.hidden ? 0 : (controls.offsetHeight || 44);
-    const headerHeight = () => header && !header.hidden ? header.offsetHeight : 0;
     let actualWidth = 0, overflowing = percent > 100;
     let divider = null;
     if (app && side) {
@@ -132,7 +132,7 @@
       if (linkPane && boardPixels != null && divider && !divider.hidden) {
         const axis = direction(), bounds = paneBounds();
         const aspect = previousWidth ? previousHeight / previousWidth : 1;
-        const boardLength = axis === 'landscape' ? boardPixels + 14 : boardPixels * aspect + controlsHeight() + headerHeight() + 14;
+        const boardLength = axis === 'landscape' ? boardPixels + 14 : boardPixels * aspect + controlsHeight() + 14;
         panes[axis] = Math.round(Math.max(bounds.min, Math.min(bounds.max, bounds.length - boardLength)));
         applyPane();
       }
@@ -187,12 +187,13 @@
       // client* rounds fractional grid sizes. Leave two extra pixels so a
       // subpixel overflow cannot create scrollbars and shrink a fitted board.
       const width = Math.max(1, Math.floor(wrap.clientWidth - 14));
-      const height = divider || root.innerWidth >= root.innerHeight ? Math.max(1, Math.floor(wrap.clientHeight - controlsHeight() - headerHeight() - 14)) : Math.max(100, Math.floor(root.innerHeight * portraitRatio));
+      const height = divider || root.innerWidth >= root.innerHeight ? Math.max(1, Math.floor(wrap.clientHeight - controlsHeight() - 14)) : Math.max(100, Math.floor(root.innerHeight * portraitRatio));
       return { width, height };
     }
     let previousWidth = 0, previousHeight = 0;
     function resized(width, height) {
       const room = available(), landscape = root.innerWidth >= root.innerHeight;
+      wrap.style.setProperty('--board-controls-height', `${controlsHeight()}px`);
       const visibleHeight = divider || landscape ? room.height : Math.min(height, room.height);
       const oldCenterX = viewport.scrollLeft + viewport.clientWidth / 2, oldCenterY = viewport.scrollTop + viewport.clientHeight / 2;
       viewport.style.height = `${Math.floor(visibleHeight)}px`;
@@ -240,7 +241,6 @@
           root.requestAnimationFrame(() => { pending = false; applyPane(); onChange(); });
         });
         observer.observe(wrap); observer.observe(controls); if (top) observer.observe(top);
-        if (header) observer.observe(header);
       }
     }
     applyPane(); update();
