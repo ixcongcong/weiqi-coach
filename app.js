@@ -2,7 +2,7 @@
 /* 围棋对战教练：对战、学习（课程与名局）、练习、提问。
  * 引擎在 engine.js；蒙特卡洛计算在 Web Worker 里进行，局部死活计算在主线程（很快）。 */
 
-const APP_VERSION = '3.15';
+const APP_VERSION = '3.16';
 const G = window.Go;
 const { EMPTY, BLACK, WHITE, PASS, NONE, RESIGN } = G;
 const GAMES = window.GAMES || [];
@@ -408,7 +408,7 @@ const pool = new Pool();
 const S = {
   mode: 'play',
   game: { size: 9, human: BLACK, handicap: 0, komi: 7.5, rule: 'normal', captureN: 1, opp: 'ai' },
-  prefs: { level: 0, target: 100, engine: 'b10', home: true, coach: true, confirm: false, cands: false, own: false, helper: true, marks: true },
+  prefs: { level: 0, target: 100, engine: 'b10', home: true, coach: true, boardCoach: false, confirm: false, cands: false, own: false, helper: true, marks: true },
   summary: null,
   setup: [],
   history: [],
@@ -773,9 +773,10 @@ function playMove(m, internal) {
   Q.mark = null;
   Q.area = null;
   S.pendingTap = NONE;
+  const capture = captureRule();
+  if (capture) captureComment(S.history.length - 1);
   save();
-  if (captureRule()) {
-    captureComment(S.history.length - 1);
+  if (capture) {
     if (!checkCaptureWin()) warnAtari(mover);
   } else {
     if (S.board.passes >= 2) startScoring();
@@ -2079,7 +2080,8 @@ function setMode(m) {
 // ---------------- 棋盘绘制 ----------------
 
 const canvas = $('board'), ctx = canvas.getContext('2d');
-const boardSizing = window.BoardView?.mount(canvas, { key: 'go', onChange: () => layout() });
+const boardCoach = $('boardCoach');
+const boardSizing = window.BoardView?.mount(canvas, { key: 'go', header: boardCoach, onChange: () => layout() });
 const geom = { cell: 0, org: 0, px: 0, n: 9 };
 
 function layout() {
@@ -2492,7 +2494,7 @@ function reasonsHtml(list) {
   return '<ul>' + list.map(r => `<li>${esc(r)}</li>`).join('') + '</ul>';
 }
 
-function commentHtml(c) {
+function commentHtml(c, pinned = false) {
   const num = `第 ${c.j + 1} 手`;
   if (c.simple) {
     return `<div class="cm ${c.you ? 'good' : 'ai'}${S.view === c.j ? ' viewing' : ''}" data-j="${c.j}">
@@ -2504,7 +2506,7 @@ function commentHtml(c) {
       <span class="wr">胜率 ${pct(c.wrBefore)} → ${pct(c.wrAfter)}${c.pts >= 0.5 ? ` · 亏 ${ptsText(c.pts)}` : ''}</span></div>${reasonsHtml(c.reasons)}`;
     if (c.leadAfter !== null && c.leadAfter !== undefined) h += `<p class="note">这手之后，${esc(c.who || '你')}${c.leadAfter >= 0 ? '领先' : '落后'}约 ${ptsText(c.leadAfter)}（按数子、含贴目）。</p>`;
     if (c.best) {
-      h += `<div class="better">更好的是 <b>${esc(c.best.name)}</b>（胜率约 ${pct(c.best.wr)}${c.best.pts >= 0.5 ? `，比实战多 ${ptsText(c.best.pts)}` : ''}）${reasonsHtml(c.best.reasons)}</div>`;
+      h += `<div class="better">更好的是 <b>${esc(c.best.name)}</b>（胜率约 ${pct(c.best.wr)}${c.best.pts >= 0.5 ? `，比实战多 ${ptsText(c.best.pts)}` : ''}）${!pinned || c.best.reasons ? reasonsHtml(c.best.reasons) : ''}</div>`;
     }
     if (c.gain && c.gain.length) h += `<p><button class="small" data-gain="${c.j}">在棋盘上看这些目</button></p>`;
     if (c.q.cls === 'slow' || c.q.cls === 'bad') h += '<p class="note">点这条点评，可以回看当时的局面并试下。</p>';
@@ -2515,6 +2517,26 @@ function commentHtml(c) {
     <div class="h"><b>${num}</b> AI 下 ${esc(c.name)}${c.eased ? ' <span class="note">（让棋）</span>' : ''}
     <span class="wr">你的胜率 ${pct(yourWr)}</span></div>${reasonsHtml(c.reasons)}
     ${c.gain && c.gain.length ? `<p><button class="small" data-gain="${c.j}">在棋盘上看 AI 得到的点</button></p>` : ''}</div>`;
+}
+
+let pinnedComment;
+function renderBoardCoach() {
+  if (!boardCoach) return;
+  const visible = S.prefs.coach && S.prefs.boardCoach && S.mode === 'play' && S.view === null &&
+    !S.result && !S.scoring && !S.scoringBusy;
+  boardCoach.hidden = !visible;
+  if (!visible) return;
+
+  // 等新的人类落子有了点评再替换，AI 的手和停一手都不会覆盖它。
+  let latest = null;
+  for (let j = S.history.length - 1; j >= 0; j--) {
+    const comment = S.comments[j];
+    if (comment?.you && S.history[j] !== PASS) { latest = comment; break; }
+  }
+  if (latest === pinnedComment) return;
+  pinnedComment = latest;
+  boardCoach.innerHTML = latest ? commentHtml(latest, true) : '<div class="cm">落子后，这里会显示这手棋的讲解。</div>';
+  boardCoach.scrollTop = 0;
 }
 
 function reviewHtml() {
@@ -2621,6 +2643,7 @@ function practiceCoachHtml() {
 
 function render() {
   const mode = S.mode;
+  renderBoardCoach();
   $('btnUser').textContent = curUser().name;
   // “提示”只在正显示提示时高亮
   $('btnHint').classList.toggle('on', !!S.hint);
@@ -2699,6 +2722,11 @@ function render() {
     $('btnEnd').disabled = !!(S.result || S.scoring);
     $('btnOwn').classList.toggle('on', S.prefs.own);
     $('chkCoach').checked = S.prefs.coach;
+    const chkBoardCoach = $('chkBoardCoach');
+    if (chkBoardCoach) {
+      chkBoardCoach.checked = S.prefs.boardCoach;
+      chkBoardCoach.disabled = !S.prefs.coach;
+    }
     $('chkCands').checked = S.prefs.cands;
     $('chkConfirm').checked = S.prefs.confirm;
     $('chkHelper').checked = S.prefs.helper;
@@ -3138,12 +3166,13 @@ function bindPref(id, key, after) {
 bindPref('chkCoach', 'coach', () => {
   if (S.prefs.coach && !captureRule()) S.analyses.forEach((a, k) => a && makeComment(k));
 });
+if ($('chkBoardCoach')) bindPref('chkBoardCoach', 'boardCoach');
 bindPref('chkCands', 'cands');
 bindPref('chkMarks', 'marks');
 bindPref('chkConfirm', 'confirm', () => { S.pendingTap = NONE; });
 bindPref('chkHelper', 'helper', () => { S.pendingTap = NONE; });
 
-$('coach').addEventListener('click', e => {
+function onCoachClick(e) {
   const opt = e.target.closest('[data-opt]');
   if (opt) { yiAnswer(+opt.dataset.opt === yiEx().correct); return; }
   const yb = e.target.closest('[data-yi]');
@@ -3186,7 +3215,9 @@ $('coach').addEventListener('click', e => {
     const j = +el.dataset.j;
     if (S.view === j) { exitReview(); render(); } else enterReview(j);
   }
-});
+}
+$('coach').addEventListener('click', onCoachClick);
+boardCoach?.addEventListener('click', onCoachClick);
 
 $('selGame').addEventListener('change', e => selectGame(+e.target.value));
 $('btnLsPrev').addEventListener('click', () => { if (T.gi > 0) selectGame(T.gi - 1); });
