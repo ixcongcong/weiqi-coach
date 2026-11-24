@@ -244,7 +244,8 @@ summary.board-coach-pill::-webkit-details-marker { display: none; }
 .board-display-panel { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 6px; width: 100%; }
 .board-display-panel[hidden] { display: none; }
 #boardDisplayToggle, #btnTogglePlayPanel { min-height: 28px; padding: 3px 10px; font-size: 12px; }
-@media (max-width: 600px) { .board-display-controls input[type=range] { display: none; } }
+.board-position-controls { display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; }
+@media (max-width: 600px) { .board-display-controls input[type=range]:not(#boardOffsetY) { display: none; } }
 #board {
   display: block;
   touch-action: none;
