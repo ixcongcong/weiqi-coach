@@ -2,7 +2,7 @@
 /* 围棋对战教练：对战、学习（课程与名局）、练习、提问。
  * 引擎在 engine.js；蒙特卡洛计算在 Web Worker 里进行，局部死活计算在主线程（很快）。 */
 
-const APP_VERSION = '3.20';
+const APP_VERSION = '3.21';
 const G = window.Go;
 const { EMPTY, BLACK, WHITE, PASS, NONE, RESIGN } = G;
 const GAMES = window.GAMES || [];
@@ -2090,7 +2090,8 @@ const boardCoachOptions = [
 ];
 const playPanelToggle = $('btnTogglePlayPanel');
 const boardSizing = window.BoardView?.mount(canvas, {
-  key: 'go', toggleAfter: playPanelToggle, extraControls: boardCoachSettings, onChange: () => layout(),
+  key: 'go', toggleAfter: playPanelToggle, extraControls: boardCoachSettings,
+  adjustVerticalPosition: true, onChange: () => layout(),
 });
 const geom = { cell: 0, org: 0, px: 0, n: 9 };
 

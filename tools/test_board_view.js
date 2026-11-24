@@ -19,7 +19,8 @@ function sourceBetween(file, start, end) {
   return text.slice(from, to);
 }
 
-function boardHarness({ key = 'go', width = 393, height = 852, stored = new Map(), rejectStorage = false, aspect = 1 } = {}) {
+function boardHarness({ key = 'go', width = 393, height = 852, stored = new Map(), rejectStorage = false, aspect = 1,
+  adjustVerticalPosition = false } = {}) {
   const elements = new Map(), windowEvents = new Map();
   let focused = null;
   class Element {
@@ -141,7 +142,7 @@ function boardHarness({ key = 'go', width = 393, height = 852, stored = new Map(
   ctx.window = ctx;
   vm.runInContext(fs.readFileSync(path.join(web, 'board-view.js'), 'utf8'), ctx, { filename: 'board-view.js' });
   let view;
-  view = ctx.BoardView.mount(canvas, { key, onChange: () => {
+  view = ctx.BoardView.mount(canvas, { key, adjustVerticalPosition, onChange: () => {
     changed++;
     // The applications redraw the canvas synchronously on a display change.
     // Model that integration here so +/- begins at the actual last width.
@@ -158,6 +159,30 @@ function boardHarness({ key = 'go', width = 393, height = 852, stored = new Map(
   return { view, canvas, wrap, app, top, side, root, ctx, stored, elements, resize,
     changed: () => changed, get: id => elements.get(id) };
 }
+
+test('Go board can move down in the available space without changing its width', () => {
+  const h = boardHarness({ adjustVerticalPosition: true });
+  h.view.setBoardPixels(300);
+  const input = h.get('boardOffsetY');
+  input.value = '50';
+  input.dispatch('input');
+  assert.equal(h.canvas.style.transform, 'translateY(50px)');
+  assert.equal(h.view.boardPixels, 300);
+
+  h.view.resized(300, h.view.available().height - 20);
+  assert.equal(h.canvas.style.transform, 'translateY(10px)');
+  h.view.resized(300, h.view.available().height);
+  assert.equal(h.canvas.style.transform, '');
+  assert.equal(input.value, '50');
+
+  const reloaded = boardHarness({ adjustVerticalPosition: true, stored: h.stored });
+  reloaded.view.resized(300, 300);
+  assert.equal(reloaded.canvas.style.transform, 'translateY(50px)');
+  reloaded.get('boardLayoutReset').click();
+  assert.equal(reloaded.get('boardOffsetY').value, '0');
+  assert.equal(reloaded.canvas.style.transform, '');
+  assert.equal(boardHarness({ key: 'cc-chess' }).get('boardOffsetY'), undefined);
+});
 
 test('display controls default collapsed, toggle accessibly and remember state for each game', () => {
   for (const key of ['go', 'cc-chess', 'cc-xiangqi']) {

@@ -7,17 +7,20 @@
     return Number.isFinite(number) ? Math.max(50, Math.min(200, Math.round(number / 10) * 10)) : 100;
   };
   const clampBoardPixels = value => value == null ? null : Number.isFinite(Number(value)) ? Math.max(96, Math.min(2400, Math.round(Number(value)))) : null;
+  const clampVerticalOffset = value => Number.isFinite(value) ? Math.max(0, Math.min(240, Math.round(value))) : 0;
   const validPane = value => typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.round(value) : null;
-  function mount(canvas, { key, toggleAfter, extraControls, onChange = () => {} } = {}) {
+  function mount(canvas, { key, toggleAfter, extraControls, adjustVerticalPosition = false, onChange = () => {} } = {}) {
     if (mounted.has(canvas)) return mounted.get(canvas);
     const wrap = canvas.parentElement, storageKey = `weiqi-board-view:${key || 'go'}`;
     let percent = 100, textPercent = 100, boardPixels = null;
+    let verticalOffset = 0, maxVerticalOffset = 0;
     const panes = { portrait: null, landscape: null };
     try {
       const saved = JSON.parse(root.localStorage.getItem(storageKey) || 'null');
       if (saved && typeof saved.percent === 'number') percent = clampPercent(saved.percent);
       if (saved && [100, 125, 150].includes(saved.textPercent)) textPercent = saved.textPercent;
       if (saved && typeof saved.boardPixels === 'number') boardPixels = clampBoardPixels(saved.boardPixels);
+      if (adjustVerticalPosition) verticalOffset = clampVerticalOffset(saved?.verticalOffset);
       if (saved?.panes) for (const direction of Object.keys(panes)) panes[direction] = validPane(saved.panes[direction]);
     } catch (e) { /* 使用默认大小。 */ }
     const create = (tag, id, text) => {
@@ -61,6 +64,21 @@
       toggle.setAttribute('aria-label', controlsExpanded ? '收起棋盘和文字显示调节' : '展开棋盘和文字显示调节');
     }
     for (const el of [label, less, range, pixelInput, more, value, reset, text, resetPanes]) panel.appendChild(el);
+    const positionInput = adjustVerticalPosition ? create('input', 'boardOffsetY') : null;
+    const positionValue = adjustVerticalPosition ? create('output') : null;
+    if (positionInput) {
+      const positionControls = create('div'); positionControls.className = 'board-position-controls';
+      const positionLabel = create('label', '', '棋盘下移'); positionLabel.htmlFor = positionInput.id;
+      positionInput.type = 'range'; positionInput.min = '0'; positionInput.max = '240'; positionInput.step = '1';
+      positionValue.setAttribute('for', positionInput.id);
+      for (const el of [positionLabel, positionInput, positionValue]) positionControls.appendChild(el);
+      panel.appendChild(positionControls);
+      positionInput.addEventListener('input', () => {
+        verticalOffset = clampVerticalOffset(Number(positionInput.value));
+        positionBoard();
+        persist();
+      });
+    }
     if (extraControls) panel.appendChild(extraControls);
     const anchor = toggleAfter || document.getElementById('btnHelp');
     if (anchor?.parentElement) anchor.parentElement.insertBefore(toggle, anchor.nextSibling);
@@ -112,7 +130,17 @@
       divider.setAttribute('aria-valuetext', `AI 解答区域${axis === 'landscape' ? '宽' : '高'} ${Math.round(displayed)} 像素`);
     }
     function persist() {
-      try { root.localStorage.setItem(storageKey, JSON.stringify({ percent, textPercent, boardPixels, panes })); } catch (e) { /* 棋局不受显示设置影响。 */ }
+      const settings = { percent, textPercent, boardPixels, panes };
+      if (adjustVerticalPosition) settings.verticalOffset = verticalOffset;
+      try { root.localStorage.setItem(storageKey, JSON.stringify(settings)); } catch (e) { /* 棋局不受显示设置影响。 */ }
+    }
+    function positionBoard() {
+      if (!positionInput) return;
+      const offset = Math.min(verticalOffset, maxVerticalOffset);
+      positionInput.value = String(verticalOffset);
+      positionValue.textContent = `${offset} px`;
+      positionInput.setAttribute('aria-valuetext', `下移 ${offset} 像素`);
+      canvas.style.transform = offset ? `translateY(${offset}px)` : '';
     }
     function update() {
       const width = actualWidth || boardPixels || 0;
@@ -148,6 +176,7 @@
     }
     function resetLayout() {
       panes.portrait = panes.landscape = null; boardPixels = null; percent = 100; overflowing = false;
+      verticalOffset = 0;
       applyPane(); update(); persist(); onChange();
     }
     range.addEventListener('input', () => setBoardPixels(range.value, { linkPane: true }));
@@ -198,6 +227,8 @@
       const oldCenterX = viewport.scrollLeft + viewport.clientWidth / 2, oldCenterY = viewport.scrollTop + viewport.clientHeight / 2;
       viewport.style.height = `${Math.floor(visibleHeight)}px`;
       stage.style.width = `${Math.ceil(Math.max(room.width, width))}px`; stage.style.height = `${Math.ceil(Math.max(visibleHeight, height))}px`;
+      maxVerticalOffset = Math.max(0, Math.floor((visibleHeight - height) / 2));
+      positionBoard();
       viewport.scrollLeft = width > room.width ? Math.max(0, previousWidth ? oldCenterX * width / previousWidth - viewport.clientWidth / 2 : (width - room.width) / 2) : 0;
       viewport.scrollTop = height > visibleHeight ? Math.max(0, previousHeight ? oldCenterY * height / previousHeight - viewport.clientHeight / 2 : (height - visibleHeight) / 2) : 0;
       previousWidth = width; previousHeight = height;
