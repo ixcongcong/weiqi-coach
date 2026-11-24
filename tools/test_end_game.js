@@ -99,7 +99,7 @@ function harness(storage = new Map()) {
       load, loadRecords, save, recordGame, recordToGame, rebuild,
       endCurrentGame, newGame, undo, humanPass, playMove, canHumanMove,
       aiTurn, captureTurn, step, advance, startScoring, growthOnEnd,
-      enterReview, exitReview, render, resign, checkCaptureWin,
+      enterReview, exitReview, render, resign, checkCaptureWin, makeComment,
       get records() { return RECORDS; },
       get board() { return S.board; },
     };
@@ -371,4 +371,67 @@ test('13- and 19-line boards preserve their full replay and correct no-result ar
     assert.equal(record.abandoned, true);
     assert.equal(h.c.recordToGame(record).moves.length, history.length * 2);
   }
+});
+
+test('board commentary waits for the next human move analysis and ignores AI and pass', async () => {
+  const h = harness(), { S, pool, makeComment, playMove, render } = h.c;
+  const panel = h.getElement('boardCoach'), move = x => S.board.pt(x, 0);
+  pool.analyze = () => new Promise(() => {});
+  pool.ownership = () => Promise.resolve({ own: new Float32Array(S.board.size) });
+  S.prefs.coach = true;
+  render();
+  assert.equal(panel.hidden, true);
+  S.prefs.boardCoach = true;
+  render();
+  assert.equal(panel.hidden, false);
+  assert.match(panel.innerHTML, /落子后/);
+
+  const comment = async index => {
+    S.analyses[index] = analysis(h, move(8), { wr: 0.7, cands: [{ move: move(8), visits: 500, wr: 0.7 }] });
+    S.analyses[index + 1] = analysis(h, move(8));
+    await makeComment(index);
+  };
+  assert.equal(playMove(move(0)), true);
+  await comment(0);
+  const first = panel.innerHTML;
+  assert.match(first, /第 1 手/);
+  assert.match(first, /更好的是/);
+  assert.doesNotMatch(first, /正在分析/);
+  assert.equal(playMove(move(1), true), true);
+  await comment(1);
+  assert.equal(playMove(h.ctx.Go.PASS), true);
+  await comment(2);
+  assert.equal(panel.innerHTML, first);
+  assert.equal(playMove(move(2), true), true);
+  assert.equal(playMove(move(3)), true);
+  assert.equal(panel.innerHTML, first);
+  assert.equal(playMove(move(3)), false);
+  await comment(4);
+  assert.match(panel.innerHTML, /第 5 手/);
+  h.c.enterReview(0);
+  assert.equal(panel.hidden, true);
+  h.c.exitReview();
+  render();
+  assert.match(panel.innerHTML, /第 5 手/);
+  h.c.endCurrentGame();
+  assert.equal(panel.hidden, true);
+});
+
+test('board commentary follows both human players and survives a reload in capture games', () => {
+  const h = harness(), { S, playMove, render } = h.c;
+  S.game.opp = 'human';
+  S.game.rule = 'capture';
+  S.prefs.coach = S.prefs.boardCoach = true;
+  assert.equal(playMove(S.board.pt(0, 0)), true);
+  assert.match(h.getElement('boardCoach').innerHTML, /第 1 手.*黑/);
+  assert.equal(playMove(S.board.pt(1, 0)), true);
+  assert.match(h.getElement('boardCoach').innerHTML, /第 2 手.*白/);
+  const reloaded = harness(h.storage);
+  reloaded.c.S.prefs.coach = true;
+  reloaded.c.render();
+  assert.equal(reloaded.c.S.prefs.boardCoach, true);
+  assert.match(reloaded.getElement('boardCoach').innerHTML, /第 2 手.*白/);
+  S.prefs.coach = false;
+  render();
+  assert.equal(h.getElement('boardCoach').hidden, true);
 });
