@@ -2,7 +2,7 @@
 /* 围棋对战教练：对战、学习（课程与名局）、练习、提问。
  * 引擎在 engine.js；蒙特卡洛计算在 Web Worker 里进行，局部死活计算在主线程（很快）。 */
 
-const APP_VERSION = '3.19';
+const APP_VERSION = '3.20';
 const G = window.Go;
 const { EMPTY, BLACK, WHITE, PASS, NONE, RESIGN } = G;
 const GAMES = window.GAMES || [];
@@ -2082,9 +2082,15 @@ function setMode(m) {
 
 const canvas = $('board'), ctx = canvas.getContext('2d');
 const boardCoach = $('boardCoach');
+const boardCoachSettings = $('boardCoachDisplaySettings');
+const boardCoachOptions = [
+  ['boardCoachPosition', 'position', 'auto'],
+  ['boardCoachFont', 'font', '16'],
+  ['boardCoachBackground', 'background', 'dark'],
+];
 const playPanelToggle = $('btnTogglePlayPanel');
 const boardSizing = window.BoardView?.mount(canvas, {
-  key: 'go', header: boardCoach, toggleAfter: playPanelToggle, onChange: () => layout(),
+  key: 'go', toggleAfter: playPanelToggle, extraControls: boardCoachSettings, onChange: () => layout(),
 });
 const geom = { cell: 0, org: 0, px: 0, n: 9 };
 
@@ -2525,9 +2531,16 @@ function commentHtml(c, pinned = false) {
 
 let pinnedComment;
 function renderBoardCoach(visible) {
+  if (boardCoachSettings?.parentElement?.id === 'boardDisplayPanel') boardCoachSettings.hidden = !visible;
   if (!boardCoach) return;
   boardCoach.hidden = !visible;
   if (!visible) return;
+  for (const [id, key, fallback] of boardCoachOptions) {
+    const value = S.prefs[id] || fallback;
+    boardCoach.dataset[key] = value;
+    const control = $(id);
+    if (control && control.value !== value) control.value = value;
+  }
 
   // 等新的人类落子有了点评再替换，AI 的手和停一手都不会覆盖它。
   let latest = null;
@@ -2537,8 +2550,13 @@ function renderBoardCoach(visible) {
   }
   if (latest === pinnedComment) return;
   pinnedComment = latest;
-  boardCoach.innerHTML = latest ? commentHtml(latest, true) : '<div class="cm">落子后，这里会显示这手棋的讲解。</div>';
-  boardCoach.scrollTop = 0;
+  if (!latest) {
+    boardCoach.innerHTML = '<p class="board-coach-pill">落子后，这里会显示这手棋的讲解。</p>';
+    return;
+  }
+  const headline = [`第 ${latest.j + 1} 手 ${latest.name}`, latest.q?.label, latest.reasons?.[0]].filter(Boolean).join(' · ');
+  boardCoach.innerHTML = `<details><summary class="board-coach-pill"><span>${esc(headline)}</span><span aria-hidden="true">⌄</span></summary>
+    <div class="board-coach-detail">${commentHtml(latest, true)}</div></details>`;
 }
 
 function reviewHtml() {
@@ -3188,6 +3206,13 @@ bindPref('chkCoach', 'coach', () => {
   if (S.prefs.coach && !captureRule()) S.analyses.forEach((a, k) => a && makeComment(k));
 });
 if ($('chkBoardCoach')) bindPref('chkBoardCoach', 'boardCoach');
+for (const [id] of boardCoachOptions) {
+  $(id)?.addEventListener('change', event => {
+    S.prefs[id] = event.target.value;
+    save();
+    renderBoardCoach(!boardCoach.hidden);
+  });
+}
 bindPref('chkCands', 'cands');
 bindPref('chkMarks', 'marks');
 bindPref('chkConfirm', 'confirm', () => { S.pendingTap = NONE; });
