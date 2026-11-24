@@ -131,6 +131,11 @@ html.board-layout-page, html.board-layout-page body { height: 100%; overflow: hi
   }
   .board-coach-layout #top, .board-coach-layout .tabs { flex-wrap: wrap; }
 }
+#app.board-layout-resizable.play-panel-hidden {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-areas: "top" "board";
+}
 
 #top {
   display: flex;
@@ -177,7 +182,7 @@ html.board-layout-page, html.board-layout-page body { height: 100%; overflow: hi
 .board-display-controls[hidden] { display: none; }
 .board-display-panel { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 6px; width: 100%; }
 .board-display-panel[hidden] { display: none; }
-#boardDisplayToggle { min-height: 28px; padding: 3px 10px; font-size: 12px; }
+#boardDisplayToggle, #btnTogglePlayPanel { min-height: 28px; padding: 3px 10px; font-size: 12px; }
 @media (max-width: 600px) { .board-display-controls input[type=range] { display: none; } }
 #board {
   display: block;

@@ -2,7 +2,7 @@
 /* 围棋对战教练：对战、学习（课程与名局）、练习、提问。
  * 引擎在 engine.js；蒙特卡洛计算在 Web Worker 里进行，局部死活计算在主线程（很快）。 */
 
-const APP_VERSION = '3.18';
+const APP_VERSION = '3.19';
 const G = window.Go;
 const { EMPTY, BLACK, WHITE, PASS, NONE, RESIGN } = G;
 const GAMES = window.GAMES || [];
@@ -421,6 +421,7 @@ const S = {
   scoringBusy: false,
   aiThinking: false,
   hint: null,
+  playPanelHidden: false,
   view: null,       // 回看：显示第 view 手之前的局面
   tries: [],        // 回看时的试下着法
   tryNote: null,
@@ -2081,7 +2082,10 @@ function setMode(m) {
 
 const canvas = $('board'), ctx = canvas.getContext('2d');
 const boardCoach = $('boardCoach');
-const boardSizing = window.BoardView?.mount(canvas, { key: 'go', header: boardCoach, onChange: () => layout() });
+const playPanelToggle = $('btnTogglePlayPanel');
+const boardSizing = window.BoardView?.mount(canvas, {
+  key: 'go', header: boardCoach, toggleAfter: playPanelToggle, onChange: () => layout(),
+});
 const geom = { cell: 0, org: 0, px: 0, n: 9 };
 
 function layout() {
@@ -2644,7 +2648,15 @@ function render() {
   const mode = S.mode;
   const boardCoachVisible = Boolean(boardCoach && S.prefs.coach && S.prefs.boardCoach && mode === 'play' &&
     S.view === null && !S.result && !S.scoring && !S.scoringBusy);
+  const playPanelHidden = boardCoachVisible && S.playPanelHidden;
   $('app').classList.toggle('board-coach-layout', boardCoachVisible);
+  $('app').classList.toggle('play-panel-hidden', playPanelHidden);
+  $('side').hidden = playPanelHidden;
+  if (playPanelToggle) {
+    playPanelToggle.hidden = !boardCoachVisible;
+    playPanelToggle.textContent = playPanelHidden ? '显示对战区' : '隐藏对战区';
+    playPanelToggle.setAttribute('aria-expanded', String(!playPanelHidden));
+  }
   const divider = $('boardPaneDivider');
   if (divider) divider.hidden = boardCoachVisible;
   renderBoardCoach(boardCoachVisible);
@@ -3154,6 +3166,11 @@ $('btnRvNext').addEventListener('click', () => reviewStep(1));
 $('btnRvClear').addEventListener('click', () => { S.tries = []; S.tryNote = null; render(); });
 $('btnRvBack').addEventListener('click', () => { exitReview(); render(); advance(); });
 $('btnHelp').addEventListener('click', () => $('dlgHelp').showModal());
+playPanelToggle?.addEventListener('click', () => {
+  S.playPanelHidden = !S.playPanelHidden;
+  render();
+  layout();
+});
 $('btnSync').addEventListener('click', openSync);
 $('btnSyncNow').addEventListener('click', syncFromDialog);
 $('btnUser').addEventListener('click', openUsers);
