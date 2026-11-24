@@ -2,7 +2,7 @@
 /* 围棋对战教练：对战、学习（课程与名局）、练习、提问。
  * 引擎在 engine.js；蒙特卡洛计算在 Web Worker 里进行，局部死活计算在主线程（很快）。 */
 
-const APP_VERSION = '3.16';
+const APP_VERSION = '3.17';
 const G = window.Go;
 const { EMPTY, BLACK, WHITE, PASS, NONE, RESIGN } = G;
 const GAMES = window.GAMES || [];
@@ -1864,7 +1864,7 @@ function yiCoachHtml() {
     if (e.type === 'choice') {
       h += '<div class="keys">' + e.options.map((o, i) => `<button data-opt="${i}">${esc(o)}</button>`).join('') + '</div>';
     } else if (e.type === 'number') {
-      h += `<form class="ask-form" data-num="1"><input id="yiNum" type="number" inputmode="numeric" placeholder="填一个数字" value="${esc(YI.input)}"><button class="primary small">确定</button></form>`;
+      h += `<form class="ask-form" data-num="1"><input id="yiNum" type="number" inputmode="decimal" step="any" placeholder="填一个数字" value="${esc(YI.input)}"><button class="primary small">确定</button></form>`;
     } else if (e.type === 'point') {
       h += '<p class="note">在棋盘上点你的答案。</p>';
     } else if (e.type === 'play') {
