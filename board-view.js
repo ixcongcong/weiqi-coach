@@ -129,7 +129,7 @@
     }
     function setBoardPixels(next, { linkPane = false } = {}) {
       boardPixels = clampBoardPixels(next); percent = 100;
-      if (linkPane && boardPixels != null && divider) {
+      if (linkPane && boardPixels != null && divider && !divider.hidden) {
         const axis = direction(), bounds = paneBounds();
         const aspect = previousWidth ? previousHeight / previousWidth : 1;
         const boardLength = axis === 'landscape' ? boardPixels + 14 : boardPixels * aspect + controlsHeight() + headerHeight() + 14;

@@ -118,6 +118,20 @@ html.board-layout-page, html.board-layout-page body { height: 100%; overflow: hi
   .board-pane-handle { width: 1px; height: 100%; }
 }
 
+#app.board-layout-resizable.board-coach-layout {
+  grid-template-rows: auto minmax(0, 1fr) fit-content(16dvh);
+  grid-template-areas: "top" "board" "side";
+}
+.board-coach-layout #coach:empty { display: none; }
+@media (min-aspect-ratio: 1/1) {
+  #app.board-layout-resizable.board-coach-layout {
+    grid-template-columns: minmax(0, 1fr) min(var(--coach-pane-size), clamp(180px, 22vw, 260px));
+    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-areas: "board top" "board side";
+  }
+  .board-coach-layout #top, .board-coach-layout .tabs { flex-wrap: wrap; }
+}
+
 #top {
   display: flex;
   align-items: center;
