@@ -18,10 +18,11 @@ assert.ok(startup > 0, 'controller startup boundary must be present');
 function element(id = '') {
   const listeners = new Map();
   const target = {
-    id, listeners, children: [], dataset: {}, style: {}, hidden: false,
+    id, listeners, children: [], dataset: {}, style: {}, attributes: {}, hidden: false,
     disabled: false, checked: false, value: '', textContent: '', open: false,
     clientWidth: 393, clientHeight: 600,
     classList: { toggle() {}, add() {}, remove() {}, contains() { return false; } },
+    setAttribute(name, value) { this.attributes[name] = String(value); },
     addEventListener(type, fn) {
       if (!listeners.has(type)) listeners.set(type, []);
       listeners.get(type).push(fn);
@@ -465,4 +466,43 @@ test('board commentary hides the move list during play while preserving hints an
   h.c.endCurrentGame();
   assert.match(coach.innerHTML, /第 1 手/);
   assert.equal(divider.hidden, false);
+});
+
+test('the top button hides the whole play panel and restores it for review and results', () => {
+  const h = harness(), { S, playMove, render } = h.c;
+  S.game.opp = 'human';
+  S.game.rule = 'capture';
+  S.prefs.coach = true;
+  const toggle = h.getElement('btnTogglePlayPanel');
+  const side = h.getElement('side'), commentary = h.getElement('boardCoach');
+  render();
+  assert.equal(toggle.hidden, true);
+  S.prefs.boardCoach = true;
+  playMove(S.board.pt(0, 0));
+  assert.equal(toggle.hidden, false);
+  assert.equal(side.hidden, false);
+  assert.equal(toggle.attributes['aria-expanded'], 'true');
+
+  toggle.dispatch('click');
+  assert.equal(side.hidden, true);
+  assert.equal(commentary.hidden, false);
+  assert.equal(toggle.textContent, '显示对战区');
+  assert.equal(toggle.attributes['aria-expanded'], 'false');
+  playMove(S.board.pt(1, 0));
+  assert.equal(side.hidden, true);
+  assert.match(commentary.innerHTML, /第 2 手/);
+  toggle.dispatch('click');
+  assert.equal(side.hidden, false);
+  assert.equal(toggle.textContent, '隐藏对战区');
+
+  toggle.dispatch('click');
+  h.c.enterReview(0);
+  assert.equal(side.hidden, false);
+  assert.equal(toggle.hidden, true);
+  h.c.exitReview();
+  render();
+  assert.equal(side.hidden, true);
+  h.c.endCurrentGame();
+  assert.equal(side.hidden, false);
+  assert.equal(toggle.hidden, true);
 });

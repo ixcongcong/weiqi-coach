@@ -8,7 +8,7 @@
   };
   const clampBoardPixels = value => value == null ? null : Number.isFinite(Number(value)) ? Math.max(96, Math.min(2400, Math.round(Number(value)))) : null;
   const validPane = value => typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.round(value) : null;
-  function mount(canvas, { key, header, onChange = () => {} } = {}) {
+  function mount(canvas, { key, header, toggleAfter, onChange = () => {} } = {}) {
     if (mounted.has(canvas)) return mounted.get(canvas);
     const wrap = canvas.parentElement, storageKey = `weiqi-board-view:${key || 'go'}`;
     let percent = 100, textPercent = 100, boardPixels = null;
@@ -61,8 +61,8 @@
       toggle.setAttribute('aria-label', controlsExpanded ? '收起棋盘和文字显示调节' : '展开棋盘和文字显示调节');
     }
     for (const el of [label, less, range, pixelInput, more, value, reset, text, resetPanes]) panel.appendChild(el);
-    const help = document.getElementById('btnHelp');
-    if (help?.parentElement) help.parentElement.insertBefore(toggle, help.nextSibling);
+    const anchor = toggleAfter || document.getElementById('btnHelp');
+    if (anchor?.parentElement) anchor.parentElement.insertBefore(toggle, anchor.nextSibling);
     else wrap.appendChild(toggle);
     controls.appendChild(panel); updateControls();
     wrap.appendChild(controls);

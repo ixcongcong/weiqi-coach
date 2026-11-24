@@ -31,6 +31,7 @@
     <button id="btnSync" class="small">同步</button>
     <button id="btnTheme" class="small" title="白天 / 夜晚" aria-label="切换白天 / 夜晚"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 5a7 7 0 0 0 0 14z" fill="currentColor" stroke="none"/><path d="M12 5a7 7 0 0 1 0 14a5 5 0 0 0 0-14z" fill="currentColor" stroke="none" opacity=".35"/><circle cx="12" cy="12" r="7"/><path d="M12 1.5v1.5M12 21v1.5M4.6 4.6l1 1M18.4 18.4l1 1M1.5 12H3M21 12h1.5M4.6 19.4l1-1M18.4 5.6l1-1"/></svg></button>
     <button id="btnHelp" class="small">说明</button>
+    <button id="btnTogglePlayPanel" type="button" class="small" aria-controls="side" aria-expanded="true" hidden>隐藏对战区</button>
   </header>
 
   <section id="boardWrap">
@@ -227,6 +228,7 @@
         <li><b>新手辅助</b>：只剩一口气（被叫吃）的棋子会套上红圈；你要下一手会让自己被叫吃的棋时，会先提醒你，再点一次才下。</li>
         <li><b>讲解</b>：每下一手都有点评——最佳 / 好棋 / 可以 / 缓手 / 恶手，原因是什么，下得不好时告诉你更好的下法。</li>
         <li><b>棋盘上方讲解</b>：开启后，对局中会收起原来的逐手讲解，给棋盘腾出空间。玩家落子的讲解会留在棋盘上方，直到下一次玩家落子的讲解算好。关闭此选项、进入回看或结束对局时，可以再次查看原来的讲解。</li>
+        <li><b>隐藏对战区</b>：开启棋盘上方讲解后，可以用顶部按钮收起胜率、对局状态和操作区。用旁边的「显示调节」设置棋盘宽度，点「显示对战区」恢复操作。</li>
         <li><b>回看</b>：想回到前面看看、想一想时用。可以一步步往前往后看，还可以在那个局面上“试下”几手，真正的对局不会被改变。看完点“回到当前”继续下。它和“悔棋”不同：悔棋会真的把棋退回去。</li>
         <li><b>提示 / 形势</b>：推荐下一手；显示双方地盘并估算谁领先。</li>
         <li><b>悔棋</b>：真正退回到你的上一手，重新下。</li>
