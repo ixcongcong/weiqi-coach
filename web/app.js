@@ -2,7 +2,7 @@
 /* 围棋对战教练：对战、学习（课程与名局）、练习、提问。
  * 引擎在 engine.js；蒙特卡洛计算在 Web Worker 里进行，局部死活计算在主线程（很快）。 */
 
-const APP_VERSION = '3.17';
+const APP_VERSION = '3.18';
 const G = window.Go;
 const { EMPTY, BLACK, WHITE, PASS, NONE, RESIGN } = G;
 const GAMES = window.GAMES || [];
@@ -2520,10 +2520,8 @@ function commentHtml(c, pinned = false) {
 }
 
 let pinnedComment;
-function renderBoardCoach() {
+function renderBoardCoach(visible) {
   if (!boardCoach) return;
-  const visible = S.prefs.coach && S.prefs.boardCoach && S.mode === 'play' && S.view === null &&
-    !S.result && !S.scoring && !S.scoringBusy;
   boardCoach.hidden = !visible;
   if (!visible) return;
 
@@ -2557,7 +2555,7 @@ function reviewHtml() {
   return h + '</div>' + (cm ? commentHtml(cm) : '');
 }
 
-function playCoachHtml() {
+function playCoachHtml(boardCoachVisible) {
   if (S.view !== null) return reviewHtml();
   let html = '';
   if ((S.result || S.scoring) && !S.summary) S.summary = buildSummary();
@@ -2570,6 +2568,7 @@ function playCoachHtml() {
         ${S.hint.others.length ? `<div class="note">其他候选：${S.hint.others.map(o => `${esc(o.name)}（${pct(o.wr)}）`).join('，')}；棋盘上的数字是走那里之后你的胜率。</div>` : ''}</div>`;
     }
   }
+  if (boardCoachVisible) return html;
   if (captureRule() && !S.history.length) {
     html += `<div class="cm game"><b>吃子棋</b><p>规则：谁先吃到 ${S.game.captureN} 个子谁赢，不用管地盘。</p>
       <p>要点：1）数一数双方的气，只剩一口气的子（红圈）马上就会被吃；2）自己被叫吃时往外长，能长出 3 口气就安全；3）叫吃对方时，把它往你自己的棋子那边赶。</p></div>`;
@@ -2643,7 +2642,12 @@ function practiceCoachHtml() {
 
 function render() {
   const mode = S.mode;
-  renderBoardCoach();
+  const boardCoachVisible = Boolean(boardCoach && S.prefs.coach && S.prefs.boardCoach && mode === 'play' &&
+    S.view === null && !S.result && !S.scoring && !S.scoringBusy);
+  $('app').classList.toggle('board-coach-layout', boardCoachVisible);
+  const divider = $('boardPaneDivider');
+  if (divider) divider.hidden = boardCoachVisible;
+  renderBoardCoach(boardCoachVisible);
   $('btnUser').textContent = curUser().name;
   // “提示”只在正显示提示时高亮
   $('btnHint').classList.toggle('on', !!S.hint);
@@ -2737,7 +2741,7 @@ function render() {
       $('btnRvNext').disabled = S.view >= S.history.length - 1;
       $('btnRvClear').disabled = !S.tries.length;
     }
-    $('coach').innerHTML = playCoachHtml();
+    $('coach').innerHTML = playCoachHtml(boardCoachVisible);
   }
   drawBoard();
 }

@@ -435,3 +435,34 @@ test('board commentary follows both human players and survives a reload in captu
   render();
   assert.equal(h.getElement('boardCoach').hidden, true);
 });
+
+test('board commentary hides the move list during play while preserving hints and review', () => {
+  const h = harness(), { S, playMove, render } = h.c;
+  S.game.opp = 'human';
+  S.game.rule = 'capture';
+  S.prefs.coach = S.prefs.boardCoach = true;
+  const coach = h.getElement('coach'), divider = h.getElement('boardPaneDivider');
+  assert.equal(playMove(S.board.pt(0, 0)), true);
+  assert.equal(coach.innerHTML, '');
+  assert.equal(divider.hidden, true);
+
+  S.hint = { loading: true };
+  render();
+  assert.match(coach.innerHTML, /提示/);
+  assert.doesNotMatch(coach.innerHTML, /第 1 手/);
+  h.c.enterReview(0);
+  assert.match(coach.innerHTML, /回看：第 1 手/);
+  assert.equal(divider.hidden, false);
+  h.c.exitReview();
+  render();
+  assert.equal(divider.hidden, true);
+
+  S.prefs.boardCoach = false;
+  render();
+  assert.match(coach.innerHTML, /第 1 手/);
+  assert.equal(divider.hidden, false);
+  S.prefs.boardCoach = true;
+  h.c.endCurrentGame();
+  assert.match(coach.innerHTML, /第 1 手/);
+  assert.equal(divider.hidden, false);
+});
